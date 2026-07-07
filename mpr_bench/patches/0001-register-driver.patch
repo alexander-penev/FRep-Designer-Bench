@@ -1,0 +1,11 @@
+--- a/benchmark/CMakeLists.txt
++++ b/benchmark/CMakeLists.txt
+@@ -17,6 +17,8 @@
+ 
+ benchmark(render_2d_table.cpp stats.cpp)
+ benchmark(render_3d_table.cpp stats.cpp)
++benchmark(mpr_bench.cpp stats.cpp)
++benchmark(mpr_emit.cpp)
+ benchmark(brute.cu stats.cpp)
+ 
+ benchmark(render_2d.cpp)

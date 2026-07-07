@@ -1,0 +1,10 @@
+my_model(x[3], a[1])
+{
+  dx1 = x[1] - 0.45; dx2 = x[1] + 0.45;
+  a1 = sqrt(dx1*dx1 + x[2]*x[2] + x[3]*x[3]) - 0.7;
+  b1 = sqrt(dx2*dx2 + x[2]*x[2] + x[3]*x[3]) - 0.7;
+  k = 0.25;
+  h = max(k - abs(a1 - b1), 0.0) / k;
+  f = min(a1, b1) - h*h*h*k/6.0;
+  my_model = -f;
+}

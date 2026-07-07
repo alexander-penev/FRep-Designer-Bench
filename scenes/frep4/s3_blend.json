@@ -1,0 +1,68 @@
+{
+  "camera": {
+    "fov_deg": 60,
+    "ortho_size": 4,
+    "position": [
+      0,
+      2,
+      7
+    ],
+    "projection": "perspective",
+    "target": [
+      0,
+      0,
+      0
+    ],
+    "up": [
+      0,
+      1,
+      0
+    ]
+  },
+  "lights": [
+    {
+      "color": [
+        1,
+        1,
+        1
+      ],
+      "intensity": 1,
+      "pos": [
+        5,
+        10,
+        5
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "geometry": {
+        "expr": "min(sqrt((x-0.45)*(x-0.45)+y*y+z*z)-0.7, sqrt((x+0.45)*(x+0.45)+y*y+z*z)-0.7) - pow(max(0.25-abs((sqrt((x-0.45)*(x-0.45)+y*y+z*z)-0.7)-(sqrt((x+0.45)*(x+0.45)+y*y+z*z)-0.7)),0.0)/0.25,3.0)*0.25/6.0",
+        "id": "s3_blend",
+        "params": {},
+        "type": "CustomExpr"
+      },
+      "id": "s3_blend",
+      "material": {
+        "albedo": [
+          0.8,
+          0.8,
+          0.8
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    }
+  ],
+  "version": "4.0"
+}

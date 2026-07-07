@@ -1,0 +1,11 @@
+my_model(x[3], a[1])
+{
+  tw = 1.2;
+  ct = cos(tw*x[3]);
+  st = sin(tw*x[3]);
+  xt = x[1]*ct + x[2]*st;
+  yt = -x[1]*st + x[2]*ct;
+  f = max(abs(xt) - 0.35, abs(yt) - 0.35);
+  f = max(f, abs(x[3]) - 1.1);
+  my_model = -f;
+}

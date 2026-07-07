@@ -1,0 +1,10 @@
+my_model(x[3], a[1])
+{
+  ax = abs(x[1]); ay = abs(x[2]); az = abs(x[3]);
+  m = max(ax, ay); m = max(m, az);
+  box = 0.9 - m;
+  r = sqrt(x[1]*x[1] + x[2]*x[2] + x[3]*x[3]);
+  sph = 1.1 - r;
+  d = -sph;
+  my_model = min(box, d);
+}

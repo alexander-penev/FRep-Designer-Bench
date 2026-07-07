@@ -1,0 +1,68 @@
+{
+  "camera": {
+    "fov_deg": 60,
+    "ortho_size": 4,
+    "position": [
+      0,
+      2,
+      7
+    ],
+    "projection": "perspective",
+    "target": [
+      0,
+      0,
+      0
+    ],
+    "up": [
+      0,
+      1,
+      0
+    ]
+  },
+  "lights": [
+    {
+      "color": [
+        1,
+        1,
+        1
+      ],
+      "intensity": 1,
+      "pos": [
+        5,
+        10,
+        5
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "geometry": {
+        "expr": "max(max(max(abs(x),abs(y)),abs(z))-0.9, 0.0-(sqrt(x*x+y*y+z*z)-1.1))",
+        "id": "s2_csg",
+        "params": {},
+        "type": "CustomExpr"
+      },
+      "id": "s2_csg",
+      "material": {
+        "albedo": [
+          0.8,
+          0.8,
+          0.8
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    }
+  ],
+  "version": "4.0"
+}

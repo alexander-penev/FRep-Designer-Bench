@@ -1,0 +1,24 @@
+system,backend,scene,metric,size,ms,throughput,joules,uj_per_unit
+hyperfun,interpreter,s1_sphere,grid,193,1554.474,4.625,-1.000,-1.0000
+hyperfun,interpreter,s2_csg,grid,193,3209.547,2.240,-1.000,-1.0000
+hyperfun,interpreter,s3_blend,grid,193,4859.385,1.479,-1.000,-1.0000
+hyperfun,interpreter,s4_gyroid,grid,193,5416.384,1.327,-1.000,-1.0000
+hyperfun,interpreter,s5_twist,grid,193,3726.350,1.929,-1.000,-1.0000
+hyperfun,interpreter,architecture,grid,65,372.613,0.737,-1.000,-1.0000
+hyperfun,interpreter,hello_world,grid,65,1620.480,0.169,-1.000,-1.0000
+hyperfun,interpreter,involute_gear_2d,grid,65,389.370,0.705,-1.000,-1.0000
+hyperfun,interpreter,involute_gear_3d,grid,65,527.644,0.520,-1.000,-1.0000
+hyperfun,interpreter,prospero,grid,65,3706.952,0.074,-1.000,-1.0000
+libfive,cpu-array,s1_sphere,grid,193,29.697,242.079,-1.000,-1.0000
+libfive,cpu-array,s2_csg,grid,193,36.034,199.507,-1.000,-1.0000
+libfive,cpu-array,s3_blend,grid,193,44.293,162.308,-1.000,-1.0000
+libfive,cpu-array,s4_gyroid,grid,193,68.779,104.524,-1.000,-1.0000
+libfive,cpu-array,s5_twist,grid,193,46.261,155.402,-1.000,-1.0000
+libfive,cpu-array,architecture,grid,97,6450.524,0.141,-1.000,-1.0000
+libfive,cpu-array,hello_world,grid,97,2209.357,0.413,-1.000,-1.0000
+libfive,cpu-array,involute_gear_2d,grid,97,16908.723,0.054,-1.000,-1.0000
+libfive,cpu-array,involute_gear_3d,grid,97,13919.009,0.065,-1.000,-1.0000
+libfive,cpu-array,prospero,grid,49,4006.694,0.029,-1.000,-1.0000
+libfive,cpu-heightmap,s4_gyroid,render3d,512,51.713,5.069,-1.000,-1.0000
+libfive,cpu-heightmap,s5_twist,render3d,512,10.710,24.477,-1.000,-1.0000
+libfive,cpu-heightmap,imported,render3d,512,CRASH,see README.sandbox

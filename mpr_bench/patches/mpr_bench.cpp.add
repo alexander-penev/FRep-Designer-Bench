@@ -1,0 +1,55 @@
+// dest: benchmark/mpr_bench.cpp
+// MPR render benchmark driver: same scenes + resolutions as libfive --render.
+// CSV: system,backend,scene,metric,size,ms,throughput,joules,uj_per_unit
+// Energy (joules,uj) left -1; GPU energy is sampled by run.sh via nvidia-smi.
+#include <libfive/tree/tree.hpp>
+#include <libfive/tree/archive.hpp>
+#include <Eigen/Dense>
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <cstdio>
+#include <fstream>
+#include <string>
+#include <vector>
+#include "tape.hpp"
+#include "context.hpp"
+
+static std::string base(std::string p) {
+    auto s = p.find_last_of('/'); if (s != std::string::npos) p = p.substr(s + 1);
+    auto d = p.find_last_of('.');  if (d != std::string::npos) p = p.substr(0, d);
+    return p;
+}
+int main(int argc, char** argv) {
+    if (argc < 2) { std::fprintf(stderr, "usage: %s scene.frep [size...]\n", argv[0]); return 1; }
+    std::ifstream ifs(argv[1]);
+    if (!ifs.is_open()) { std::fprintf(stderr, "open %s failed\n", argv[1]); return 1; }
+    libfive::Tree t = libfive::Archive::deserialize(ifs).shapes.front().tree;
+    std::string name = base(argv[1]);
+
+    std::vector<int> sizes;
+    for (int i = 2; i < argc; ++i) sizes.push_back(std::atoi(argv[i]));
+    if (sizes.empty()) sizes = {512, 1024};
+
+    Eigen::Matrix4f T = Eigen::Matrix4f::Identity(); T(3, 2) = 0.3f;
+    auto tape = mpr::Tape(t);
+    for (int size : sizes) {
+        mpr::Context c(size);
+        c.render3D(tape, T);                                   // warmup
+        const int reps = 5;
+        std::vector<double> ms;
+        for (int r = 0; r < reps; ++r) {
+            auto a = std::chrono::steady_clock::now();
+            c.render3D(tape, T);
+            auto b = std::chrono::steady_clock::now();
+            ms.push_back(std::chrono::duration<double, std::milli>(b - a).count());
+        }
+        std::sort(ms.begin(), ms.end());
+        double m = ms[reps / 2];
+        double px = double(size) * size;
+        std::printf("mpr,gpu-cuda,%s,render3d,%d,%.3f,%.3f,-1.000,-1.0000\n",
+                    name.c_str(), size, m, px / m / 1e3);
+        std::fflush(stdout);
+    }
+    return 0;
+}

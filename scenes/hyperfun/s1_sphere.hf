@@ -1,0 +1,5 @@
+my_model(x[3], a[1])
+{
+  r = sqrt(x[1]*x[1] + x[2]*x[2] + x[3]*x[3]);
+  my_model = 1.0 - r;
+}

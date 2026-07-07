@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.16)
+project(libfive_bench CXX)
+set(CMAKE_CXX_STANDARD 17)
+# expects sibling ../libfive built in ../libfive/build
+add_executable(bench_libfive bench_libfive.cpp)
+if(NOT DEFINED LIBFIVE_ROOT)
+  set(LIBFIVE_ROOT ${CMAKE_SOURCE_DIR}/../libfive)
+endif()
+target_include_directories(bench_libfive PRIVATE ${LIBFIVE_ROOT}/libfive/include /usr/include/eigen3)
+target_link_directories(bench_libfive PRIVATE ${LIBFIVE_ROOT}/build/libfive/src)
+target_compile_options(bench_libfive PRIVATE -O3 -march=native -DEIGEN_NO_DEBUG)
+target_link_libraries(bench_libfive five png pthread)

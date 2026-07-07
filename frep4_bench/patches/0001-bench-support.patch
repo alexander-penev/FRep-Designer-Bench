@@ -1,0 +1,177 @@
+--- a/CMakeLists.txt	2026-06-27 04:06:15.000000000 +0000
++++ b/CMakeLists.txt	2026-07-05 14:14:53.916213862 +0000
+@@ -1,5 +1,5 @@
+ cmake_minimum_required(VERSION 3.28)
+-project(frep VERSION 4.32.2 LANGUAGES C CXX)
++project(frep VERSION 4.32.4 LANGUAGES C CXX)
+ 
+ # ═════════════════════════════════════════════════════════════════════════════
+ # C++26
+@@ -118,7 +118,7 @@
+ )
+ target_compile_definitions(frep_opts INTERFACE ${LLVM_DEFINITIONS_LIST})
+ target_include_directories(frep_opts INTERFACE
+-    ${CMAKE_SOURCE_DIR}
++    ${CMAKE_CURRENT_SOURCE_DIR}
+     ${LLVM_INCLUDE_DIRS}
+ )
+ 
+@@ -299,9 +299,9 @@
+     add_custom_command(
+         OUTPUT ${SPHERE_TRACE_SPV}
+         COMMAND ${GLSLANG_VALIDATOR} -V
+-                ${CMAKE_SOURCE_DIR}/gpu/sphere_trace.comp
++                ${CMAKE_CURRENT_SOURCE_DIR}/gpu/sphere_trace.comp
+                 -o ${SPHERE_TRACE_SPV}
+-        DEPENDS ${CMAKE_SOURCE_DIR}/gpu/sphere_trace.comp
++        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gpu/sphere_trace.comp
+         COMMENT "Compiling sphere_trace.comp → sphere_trace.spv"
+         VERBATIM
+     )
+@@ -391,7 +391,7 @@
+ # ═════════════════════════════════════════════════════════════════════════════
+ if(FREP_BUILD_OPENCL)
+     target_sources(frep_core PRIVATE core/gpu/opencl_ctx.cpp)
+-    target_include_directories(frep_core PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
++    target_include_directories(frep_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+     target_link_libraries(frep_core PUBLIC ${OPENCL_LIB})
+     target_compile_definitions(frep_core PUBLIC FREP_HAS_OPENCL)
+ endif()
+@@ -485,7 +485,7 @@
+             ENABLE_EXPORTS ON
+         )
+         target_include_directories(frep_designer PRIVATE
+-            ${CMAKE_SOURCE_DIR}
++            ${CMAKE_CURRENT_SOURCE_DIR}
+             ${LLVM_INCLUDE_DIRS})
+         target_compile_definitions(frep_designer PRIVATE
+             ${LLVM_DEFINITIONS_LIST}
+@@ -523,7 +523,7 @@
+         )
+         set_target_properties(test_node_graph PROPERTIES CXX_STANDARD 23)
+         target_include_directories(test_node_graph PRIVATE
+-            ${CMAKE_SOURCE_DIR}
++            ${CMAKE_CURRENT_SOURCE_DIR}
+             ${LLVM_INCLUDE_DIRS})
+         target_compile_definitions(test_node_graph PRIVATE
+             ${LLVM_DEFINITIONS_LIST}
+@@ -549,9 +549,11 @@
+             gui/executor_viewport.hpp
+             gui/iviewport.hpp
+         )
+-        set_target_properties(repro_cpu_ir_black PROPERTIES CXX_STANDARD 23)
++        set_target_properties(repro_cpu_ir_black PROPERTIES
++            CXX_STANDARD 23
++            AUTOMOC ON)
+         target_include_directories(repro_cpu_ir_black PRIVATE
+-            ${CMAKE_SOURCE_DIR}
++            ${CMAKE_CURRENT_SOURCE_DIR}
+             ${LLVM_INCLUDE_DIRS})
+         target_compile_definitions(repro_cpu_ir_black PRIVATE
+             ${LLVM_DEFINITIONS_LIST}
+@@ -662,8 +664,8 @@
+ find_package(Doxygen QUIET)
+ if(DOXYGEN_FOUND)
+     add_custom_target(docs
+-        COMMAND Doxygen::doxygen ${CMAKE_SOURCE_DIR}/Doxyfile
+-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
++        COMMAND Doxygen::doxygen ${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile
++        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+         COMMENT "Generating API documentation with Doxygen"
+         VERBATIM
+     )
+@@ -687,15 +689,15 @@
+ # green local run implies a green CI run (modulo CI runner noise).
+ # ═════════════════════════════════════════════════════════════════════════════
+ find_package(Python3 COMPONENTS Interpreter QUIET)
+-if(Python3_Interpreter_FOUND)
++if(Python3_Interpreter_FOUND AND TARGET frep_bench)
+     set(_PERF_REPORT ${CMAKE_BINARY_DIR}/perf_report.json)
+ 
+     add_custom_target(perf-check
+         COMMAND $<TARGET_FILE:frep_bench> --json > ${_PERF_REPORT}
+         COMMAND ${Python3_EXECUTABLE}
+-                ${CMAKE_SOURCE_DIR}/tools/perf_check.py
++                ${CMAKE_CURRENT_SOURCE_DIR}/tools/perf_check.py
+                 ${_PERF_REPORT}
+-                --baseline ${CMAKE_SOURCE_DIR}/tools/perf_baseline.json
++                --baseline ${CMAKE_CURRENT_SOURCE_DIR}/tools/perf_baseline.json
+                 --cpu-threshold 2.0
+                 --gpu-threshold 3.0
+         DEPENDS frep_bench
+@@ -707,7 +709,7 @@
+ 
+     add_custom_target(perf-update-baseline
+         COMMAND $<TARGET_FILE:frep_bench> --json
+-                > ${CMAKE_SOURCE_DIR}/tools/perf_baseline.json
++                > ${CMAKE_CURRENT_SOURCE_DIR}/tools/perf_baseline.json
+         DEPENDS frep_bench
+         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+         COMMENT "Refreshing tools/perf_baseline.json from current build"
+--- a/core/frep/expr_ast.hpp	2026-06-15 03:58:53.000000000 +0000
++++ b/core/frep/expr_ast.hpp	2026-07-05 14:12:24.337731711 +0000
+@@ -157,7 +157,12 @@
+     if (name == "log"   ) return 1;
+     if (name == "floor" ) return 1;
+     if (name == "ceil"  ) return 1;
++    if (name == "atan"  ) return 1;
++    if (name == "asin"  ) return 1;
++    if (name == "acos"  ) return 1;
+     if (name == "pow"   ) return 2;
++    if (name == "atan2" ) return 2;
++    if (name == "mod"   ) return 2;
+     if (name == "min"   ) return 2;
+     if (name == "max"   ) return 2;
+     return -1;
+--- a/core/frep/custom_expr.cpp	2026-06-15 03:58:53.000000000 +0000
++++ b/core/frep/custom_expr.cpp	2026-07-05 14:12:24.337974868 +0000
+@@ -102,6 +102,22 @@
+     if (name == "min")   return binary(llvm::Intrinsic::minnum);
+     if (name == "max")   return binary(llvm::Intrinsic::maxnum);
+     if (name == "pow")   return binary(llvm::Intrinsic::pow);
++    // Inverse-trig / atan2 / mod: no LLVM intrinsics -> libm calls.
++    // CPU-JIT resolves them from the process; GPU_IR (NVPTX) needs
++    // self-contained transcendentals, so these are CPU-only for now.
++    auto libm1 = [&](const char* fn) {
++        auto* fty = llvm::FunctionType::get(b.getFloatTy(), {b.getFloatTy()}, false);
++        return b.CreateCall(mod_->getOrInsertFunction(fn, fty), {args[0]});
++    };
++    auto libm2 = [&](const char* fn) {
++        auto* fty = llvm::FunctionType::get(b.getFloatTy(), {b.getFloatTy(), b.getFloatTy()}, false);
++        return b.CreateCall(mod_->getOrInsertFunction(fn, fty), {args[0], args[1]});
++    };
++    if (name == "asin")  return libm1("asinf");
++    if (name == "acos")  return libm1("acosf");
++    if (name == "atan")  return libm1("atanf");
++    if (name == "atan2") return libm2("atan2f");
++    if (name == "mod")   return libm2("fmodf");
+     if (name == "tan") {
+         // No tan intrinsic — build sin/cos.
+         auto s = frep::llvm_compat::unary_intrinsic(b, llvm::Intrinsic::sin, args[0]);
+@@ -223,11 +239,16 @@
+             if (name == "exp")   return std::exp(a0);
+             if (name == "log")   return std::log(a0);
+             if (name == "floor") return std::floor(a0);
++            if (name == "asin")  return std::asin(a0);
++            if (name == "acos")  return std::acos(a0);
++            if (name == "atan")  return std::atan(a0);
+             if (name == "ceil")  return std::ceil(a0);
+             float a1 = eval_ast(*n.children[1], x, y, z);
+             if (name == "pow")   return std::pow(a0, a1);
+             if (name == "min")   return std::fmin(a0, a1);
+             if (name == "max")   return std::fmax(a0, a1);
++            if (name == "atan2") return std::atan2(a0, a1);
++            if (name == "mod")   return std::fmod(a0, a1);
+             throw std::runtime_error("unknown function '" + name + "'");
+         }
+     }
+@@ -289,7 +310,8 @@
+         case Kind::Call: {
+             // All supported functions have matching names in GLSL.
+             // `abs` works for floats; `pow/min/max` accept two scalars.
+-            out << n.ident << "(";
++            // GLSL dialect: atan2(y,x) -> atan(y,x); mod() is GLSL mod.
++            out << (n.ident == std::string("atan2") ? "atan" : n.ident.c_str()) << "(";
+             for (std::size_t i = 0; i < n.children.size(); ++i) {
+                 if (i) out << ", ";
+                 emit_glsl_ast(out, *n.children[i]);

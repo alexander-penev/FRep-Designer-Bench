@@ -1,0 +1,23 @@
+// dest: benchmark/mpr_emit.cpp
+// Emit canonical scenes with MPR's pinned libfive (serialize-compatible with its deserializer).
+#include <libfive/tree/tree.hpp>
+#include <libfive/tree/archive.hpp>
+#include <fstream>
+#include <string>
+#include <vector>
+using libfive::Tree;
+static Tree len(Tree x,Tree y,Tree z){return sqrt(x*x+y*y+z*z);}
+int main(int argc,char**argv){
+    std::string d=argc>1?argv[1]:".";
+    Tree x=Tree::X(),y=Tree::Y(),z=Tree::Z();
+    std::vector<std::pair<std::string,Tree>> v;
+    v.emplace_back("s1_sphere",len(x,y,z)-1.0);
+    v.emplace_back("s2_csg",max(max(max(abs(x),abs(y)),abs(z))-0.9,-(len(x,y,z)-1.1)));
+    {Tree a=len(x-0.45,y,z)-0.7,b=len(x+0.45,y,z)-0.7,k(0.25);
+     Tree h=max(k-abs(a-b),Tree(0.0))/k; v.emplace_back("s3_blend",min(a,b)-h*h*h*k/6.0);}
+    v.emplace_back("s4_gyroid",max(sin(x*3.0)*cos(y*3.0)+sin(y*3.0)*cos(z*3.0)+sin(z*3.0)*cos(x*3.0)-0.2,len(x,y,z)-1.4));
+    {Tree w(1.2),c=cos(z*w),s=sin(z*w),xt=x*c+y*s,yt=x*(-s)+y*c;
+     v.emplace_back("s5_twist",max(max(abs(xt)-0.35,abs(yt)-0.35),abs(z)-1.1));}
+    for(auto&[n,t]:v){std::ofstream f(d+"/"+n+".frep",std::ios::binary);libfive::Archive a(t);a.serialize(f);}
+    return 0;
+}
