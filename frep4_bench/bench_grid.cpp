@@ -22,34 +22,43 @@ int main(int argc, char** argv) {
         // Optional interval-pruning path: FREP4_PRUNE=1 evaluates only octree
         // leaf cells whose sign interval arithmetic cannot resolve.
         const bool prune = getenv("FREP4_PRUNE") && atoi(getenv("FREP4_PRUNE"));
-        auto simd = jit::compile_scene_sdf_simd(s, 8);
+        auto simd = jit::compile_scene_sdf_simd(s);   // width auto-selected (8 AVX2 / 16 AVX-512)
         const char* backend = "cpu_ir-jit";
         bool did_prune = false;
         if (prune && simd) {
             auto ival = jit::compile_scene_sdf_interval(s);
-            if (ival) {
+            auto sca0 = jit::compile_scene_sdf(s);
+            if (ival && sca0) {
                 static jit::CompiledSdfInterval ik = std::move(*ival);
                 static jit::CompiledSdfSimd     sk = std::move(*simd);
+                static jit::CompiledSdf         tk = std::move(*sca0);
                 auto ivfn = ik.fn; auto vfn = sk.fn; unsigned W = sk.width;
+                auto sfn = tk.fn;   // scalar fn for the sub-W tail
                 auto coordp = [&](long i){ return -1.6f + 3.2f * i / (N - 1); };
                 auto leaves = jit::octree_leaves(ivfn, N, -1.6f, 1.6f, 4);
                 long leafcells=0; for(auto&b:leaves)leafcells+=(b.x1-b.x0+1)*(b.y1-b.y0+1)*(b.z1-b.z0+1);
                 if (leafcells <= (long)N*N*N*9/10) {   // interval tight enough
-                auto body = [&, ivfn, vfn, W] {
-                    volatile float sink = 0; float O[16];
+                // Leaf boxes are small (<= leaf^3, leaf=4), so a per-box z-run is
+                // shorter than the vector width and never fills a lane group.
+                // Stream all leaf cells into a W-wide buffer instead, flushing
+                // whenever it fills; only the final partial buffer goes scalar.
+                auto body = [&, ivfn, vfn, sfn, W] {
+                    float acc = 0;                     // local; escapes once below
+                    float xs[16], ys[16], zs[16], O[16];
+                    unsigned n = 0;
+                    auto flush = [&]{ if (!n) return;
+                        if (n == W) { vfn(xs, ys, zs, O); for (unsigned l=0;l<W;++l) acc += O[l]; }
+                        else        { for (unsigned l=0;l<n;++l) acc += sfn(xs[l], ys[l], zs[l]); }
+                        n = 0; };
                     for (auto& b : leaves)
                         for (long i=b.x0;i<=b.x1;++i){ float xi=coordp(i);
                         for (long j=b.y0;j<=b.y1;++j){ float yj=coordp(j);
-                            long k=b.z0;
-                            for (; k+(long)W<=b.z1+1; k+=W){
-                                float xs[16],ys[16],zs[16];
-                                for(unsigned l=0;l<W;++l){xs[l]=xi;ys[l]=yj;zs[l]=coordp(k+l);}
-                                vfn(xs,ys,zs,O); sink+=O[0];
-                            }
-                            for (; k<=b.z1; ++k){ float xs[16]={xi},ys[16]={yj},zs[16]={coordp(k)};
-                                vfn(xs,ys,zs,O); sink+=O[0]; }
-                        }}
-                    (void)sink;
+                        for (long k=b.z0;k<=b.z1;++k){
+                            xs[n]=xi; ys[n]=yj; zs[n]=coordp(k);
+                            if (++n == W) flush();
+                        }}}
+                    flush();
+                    static volatile float sink; sink = acc;
                 };
                 auto [ms, Jl] = median_ms_energy(body);
                 const long total = N*N*N;
@@ -66,10 +75,15 @@ int main(int argc, char** argv) {
         std::vector<float> X(N), Y(N), Z(N);
         auto coord = [&](long i){ return -1.6f + 3.2f * i / (N - 1); };
         if (simd) {
-            backend = "cpu_ir-simd8";
-            auto fn = simd->fn; unsigned W = simd->width;
-            body = [&, fn, W] {
-                float O[16]; volatile float sink = 0;
+            // Backend name reflects the width actually used (8 on AVX2, 16 on AVX-512).
+            static std::string simd_backend = "cpu_ir-simd" + std::to_string(simd->width);
+            backend = simd_backend.c_str();
+            auto sca1 = jit::compile_scene_sdf(s);
+            if (!sca1) { std::fprintf(stderr, "%s: %s\n", argv[a], sca1.error().c_str()); return 2; }
+            static jit::CompiledSdf tailk = std::move(*sca1);
+            auto fn = simd->fn; unsigned W = simd->width; auto sfn = tailk.fn;
+            body = [&, fn, sfn, W] {
+                float O[16]; float acc = 0;
                 std::vector<float> zx(N);
                 for (long k = 0; k < N; ++k) zx[k] = coord(k);
                 for (long i = 0; i < N; ++i) { float xi = coord(i);
@@ -79,12 +93,11 @@ int main(int argc, char** argv) {
                         float xs[16], ys[16];
                         for (unsigned l = 0; l < W; ++l) { xs[l] = xi; ys[l] = yj; }
                         fn(xs, ys, &zx[k], O);
-                        sink += O[0];
+                        for (unsigned l = 0; l < W; ++l) acc += O[l];
                     }
-                    for (; k < N; ++k) { float o; float xs[16]={xi},ys[16]={yj},zs[16]={zx[k]};
-                        fn(xs, ys, zs, O); o = O[0]; sink += o; }  // scalar tail via 1-lane-ish
+                    for (; k < N; ++k) acc += sfn(xi, yj, zx[k]);   // scalar tail
                 }}
-                (void)sink;
+                static volatile float sink; sink = acc;
             };
         } else {
             auto sc = jit::compile_scene_sdf(s);
@@ -92,11 +105,11 @@ int main(int argc, char** argv) {
             static jit::CompiledSdf keep = std::move(*sc);
             auto fn = keep.fn;
             body = [&, fn] {
-                volatile float sink = 0;
+                float acc = 0;
                 for (long i = 0; i < N; ++i) { float xi = coord(i);
                 for (long j = 0; j < N; ++j) { float yj = coord(j);
-                for (long k = 0; k < N; ++k) sink += fn(xi, yj, coord(k)); }}
-                (void)sink;
+                for (long k = 0; k < N; ++k) acc += fn(xi, yj, coord(k)); }}
+                static volatile float sink; sink = acc;
             };
         }
         auto [ms, Jl] = median_ms_energy(body);

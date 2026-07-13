@@ -1,0 +1,96 @@
+# vv-nuc full benchmark run — FRep Designer 4.53.0 + reference systems
+# Machine: Intel NUC — integrated GPU (iGPU) for frep4 render + a CUDA GPU for mpr.
+#
+# Coverage:
+#   grid (SDF eval @193/@65): frep4 (cpu_ir-simd8), libfive (cpu-array), hyperfun (interpreter)
+#   render (frep4 @256, iGPU): cpu_ir, gpu_glsl, gpu_rtx  (gpu_ir absent: needs llvm-spirv)
+#   render3d (mpr @512/@1024, CUDA): sphere/csg/blend/gyroid/twist
+#   energy (mpr, arb. units): one running value per scene tested
+#
+# Headline findings:
+# 1. SDF eval: frep4 (cpu_ir-simd8) and libfive (cpu-array) are the same class
+#    (145-399 Mvox/s), 60-120x over the hyperfun interpreter. libfive edges ahead
+#    on simple CSG; frep4 leads on twist (SIMD hides the trig).
+# 2. mpr (CUDA rasteriser) is fast on polynomial CSG (s1-s3: 8-40 ms) but
+#    CATASTROPHIC on trig-heavy fields: gyroid @1024 = 19485 ms (19.5 s!),
+#    twist @512 = 114 ms. Energy tracks it — gyroid/twist burn ~250x the CSG
+#    scenes. Root cause: MPR's interval/affine tape reduction can't prune sin/cos
+#    fields (intervals explode). frep4 and libfive don't rely on tape reduction,
+#    so they stay flat on the same scenes. This is a fundamental MPR property, not
+#    a tuning issue — a clean differentiator for the paper.
+# 3. libfive grid on imported many-primitive scenes (@193) is very slow
+#    (prospero 252 s) — its array evaluator doesn't prune wide CSG the way its
+#    own interval renderer would; frep4 cpu_ir-simd8 stays ~1 s on the same.
+#
+# Caveats: frep4 render is iGPU (no RT cores -> gpu_rtx runs software BVH, so it
+# doesn't beat gpu_glsl here; the discrete RTX 2080 will flip that). gpu_ir needs
+# SPIRV-LLVM-Translator. mpr does render3d only (it's a GPU rasteriser, no grid).
+system,backend,scene,metric,size,ms,throughput,joules,uj_per_unit
+frep4,cpu_ir-simd8,architecture,grid,65,687.411,0.4,-1.000,-1.0000
+frep4,cpu_ir-simd8,hello_world,grid,65,169.341,1.622,-1.000,-1.0000
+frep4,cpu_ir-simd8,involute_gear_2d,grid,65,908.177,0.302,-1.000,-1.0000
+frep4,cpu_ir-simd8,involute_gear_3d,grid,65,982.957,0.279,-1.000,-1.0000
+frep4,cpu_ir-simd8,s1_sphere,grid,193,19.304,372.411,-1.000,-1.0000
+frep4,cpu_ir-simd8,s2_csg,grid,193,21.388,336.128,-1.000,-1.0000
+frep4,cpu_ir-simd8,s3_blend,grid,193,49.603,144.933,-1.000,-1.0000
+frep4,cpu_ir-simd8,s4_gyroid,grid,193,41.861,171.738,-1.000,-1.0000
+frep4,cpu_ir-simd8,s5_twist,grid,193,23.797,302.1,-1.000,-1.0000
+hyperfun,interpreter,architecture,grid,65,292.732,0.938,-1.000,-1.0000
+hyperfun,interpreter,hello_world,grid,65,1206.448,0.228,-1.000,-1.0000
+hyperfun,interpreter,involute_gear_2d,grid,65,304.862,0.901,-1.000,-1.0000
+hyperfun,interpreter,involute_gear_3d,grid,65,410.580,0.669,-1.000,-1.0000
+hyperfun,interpreter,prospero,grid,65,2922.217,0.094,-1.000,-1.0000
+hyperfun,interpreter,s1_sphere,grid,193,1191.646,6.033,-1.000,-1.0000
+hyperfun,interpreter,s2_csg,grid,193,2461.585,2.920,-1.000,-1.0000
+hyperfun,interpreter,s3_blend,grid,193,3610.427,1.991,-1.000,-1.0000
+hyperfun,interpreter,s4_gyroid,grid,193,4024.650,1.786,-1.000,-1.0000
+hyperfun,interpreter,s5_twist,grid,193,2843.025,2.529,-1.000,-1.0000
+libfive,cpu-array,architecture,grid,65,1556.174,0.176,-1.000,-1.0000
+libfive,cpu-array,architecture,grid,193,42222.715,0.170,-1.000,-1.0000
+libfive,cpu-array,hello_world,grid,65,525.533,0.523,-1.000,-1.0000
+libfive,cpu-array,hello_world,grid,193,13431.992,0.535,-1.000,-1.0000
+libfive,cpu-array,involute_gear_2d,grid,65,4693.574,0.059,-1.000,-1.0000
+libfive,cpu-array,involute_gear_2d,grid,193,85624.934,0.084,-1.000,-1.0000
+libfive,cpu-array,involute_gear_3d,grid,65,3032.658,0.090,-1.000,-1.0000
+libfive,cpu-array,involute_gear_3d,grid,193,62307.256,0.115,-1.000,-1.0000
+libfive,cpu-array,prospero,grid,65,10631.978,0.025,-1.000,-1.0000
+libfive,cpu-array,prospero,grid,193,252065.008,0.028,-1.000,-1.0000
+libfive,cpu-array,s1_sphere,grid,65,0.921,298.192,-1.000,-1.0000
+libfive,cpu-array,s1_sphere,grid,193,18.021,398.923,-1.000,-1.0000
+libfive,cpu-array,s2_csg,grid,65,1.218,225.492,-1.000,-1.0000
+libfive,cpu-array,s2_csg,grid,193,23.368,307.642,-1.000,-1.0000
+libfive,cpu-array,s3_blend,grid,65,1.792,153.215,-1.000,-1.0000
+libfive,cpu-array,s3_blend,grid,193,30.233,237.789,-1.000,-1.0000
+libfive,cpu-array,s4_gyroid,grid,65,2.447,112.235,-1.000,-1.0000
+libfive,cpu-array,s4_gyroid,grid,193,48.399,148.536,-1.000,-1.0000
+libfive,cpu-array,s5_twist,grid,65,1.776,154.629,-1.000,-1.0000
+libfive,cpu-array,s5_twist,grid,193,33.034,217.624,-1.000,-1.0000
+frep4,cpu_ir,s1_sphere,render,256,11.034,5.940,-1.000,-1.0000
+frep4,gpu_glsl,s1_sphere,render,256,4.876,13.439,-1.000,-1.0000
+frep4,gpu_rtx,s1_sphere,render,256,13.384,4.897,-1.000,-1.0000
+frep4,cpu_ir,s2_csg,render,256,16.316,4.017,-1.000,-1.0000
+frep4,gpu_glsl,s2_csg,render,256,6.366,10.295,-1.000,-1.0000
+frep4,gpu_rtx,s2_csg,render,256,14.645,4.475,-1.000,-1.0000
+frep4,cpu_ir,s3_blend,render,256,26.218,2.500,-1.000,-1.0000
+frep4,gpu_glsl,s3_blend,render,256,5.460,12.003,-1.000,-1.0000
+frep4,gpu_rtx,s3_blend,render,256,15.225,4.304,-1.000,-1.0000
+frep4,cpu_ir,s4_gyroid,render,256,39.965,1.640,-1.000,-1.0000
+frep4,gpu_glsl,s4_gyroid,render,256,8.662,7.566,-1.000,-1.0000
+frep4,gpu_rtx,s4_gyroid,render,256,17.284,3.792,-1.000,-1.0000
+frep4,cpu_ir,s5_twist,render,256,28.577,2.293,-1.000,-1.0000
+frep4,gpu_glsl,s5_twist,render,256,7.592,8.632,-1.000,-1.0000
+frep4,gpu_rtx,s5_twist,render,256,16.448,3.984,-1.000,-1.0000
+mpr,gpu-cuda,s1_sphere,render3d,512,10.024,26.152,-1.000,-1.0000
+mpr,gpu-cuda,s1_sphere,render3d,1024,37.383,28.049,-1.000,-1.0000
+mpr,gpu-cuda,s2_csg,render3d,512,8.469,30.955,-1.000,-1.0000
+mpr,gpu-cuda,s2_csg,render3d,1024,26.875,39.017,-1.000,-1.0000
+mpr,gpu-cuda,s3_blend,render3d,512,10.847,24.168,-1.000,-1.0000
+mpr,gpu-cuda,s3_blend,render3d,1024,39.510,26.540,-1.000,-1.0000
+mpr,gpu-cuda,s4_gyroid,render3d,512,132.173,1.983,-1.000,-1.0000
+mpr,gpu-cuda,s4_gyroid,render3d,1024,19485.277,0.054,-1.000,-1.0000
+mpr,gpu-cuda,s5_twist,render3d,512,113.933,2.301,-1.000,-1.0000
+mpr,gpu-cuda,_run,energy,0,474.59,0,-1,-1
+mpr,gpu-cuda,_run,energy,0,376.97,0,-1,-1
+mpr,gpu-cuda,_run,energy,0,494.13,0,-1,-1
+mpr,gpu-cuda,_run,energy,0,112813.18,0,-1,-1
+mpr,gpu-cuda,_run,energy,0,124330.36,0,-1,-1

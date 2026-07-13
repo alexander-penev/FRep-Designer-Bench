@@ -1,0 +1,36 @@
+# Render-path benchmark — 512x512, real hardware
+# Platform: Intel NUC integrated GPU (iGPU), NOT the discrete RTX 2080.
+# Source: FRep Designer 4.53.0 (public repo).
+#
+# Reading these numbers:
+# - gpu_glsl holds ~4.4-5.4 ms across ALL scenes regardless of SDF complexity
+#   (sphere vs gyroid) -> the compute path is bound by parallel throughput, not
+#   per-sample SDF cost. Even an iGPU saturates enough to hide the heavier field.
+# - gpu_rtx is ~10-13 ms and does NOT beat gpu_glsl here. The NUC iGPU has no
+#   hardware RT cores, so the RT pipeline runs a software BVH fallback. On the
+#   discrete RTX 2080 (real RT cores) this flips, especially for many-object
+#   scenes where the hardware BVH broad-phase pays off (e.g. the thousands of
+#   identical crystals in the Geant4/HEP use case).
+# - cpu_ir scales with scene complexity (9.8 -> 23.2 ms): serial-per-core, so the
+#   heavier SDF shows directly.
+# - gpu_ir is absent (needs llvm-spirv / SPIRV-LLVM-Translator).
+#
+# gpu_glsl speedup over cpu_ir grows with complexity: 1.8x (sphere) -> 5.1x (gyroid).
+# These are iGPU numbers; discrete-GPU numbers will be substantially faster and
+# should be gathered on the RTX 2080 before use in the paper.
+system,backend,scene,metric,size,ms,throughput,joules,uj_per_unit
+frep4,cpu_ir,s1_sphere,render,512,9.811,26.718,-1.000,-1.0000
+frep4,gpu_glsl,s1_sphere,render,512,5.383,48.696,-1.000,-1.0000
+frep4,gpu_rtx,s1_sphere,render,512,9.897,26.486,-1.000,-1.0000
+frep4,cpu_ir,s2_csg,render,512,9.278,28.255,-1.000,-1.0000
+frep4,gpu_glsl,s2_csg,render,512,4.600,56.990,-1.000,-1.0000
+frep4,gpu_rtx,s2_csg,render,512,11.213,23.378,-1.000,-1.0000
+frep4,cpu_ir,s3_blend,render,512,13.554,19.341,-1.000,-1.0000
+frep4,gpu_glsl,s3_blend,render,512,4.360,60.129,-1.000,-1.0000
+frep4,gpu_rtx,s3_blend,render,512,11.919,21.993,-1.000,-1.0000
+frep4,cpu_ir,s4_gyroid,render,512,23.248,11.276,-1.000,-1.0000
+frep4,gpu_glsl,s4_gyroid,render,512,4.581,57.221,-1.000,-1.0000
+frep4,gpu_rtx,s4_gyroid,render,512,13.441,19.504,-1.000,-1.0000
+frep4,cpu_ir,s5_twist,render,512,14.338,18.284,-1.000,-1.0000
+frep4,gpu_glsl,s5_twist,render,512,4.511,58.111,-1.000,-1.0000
+frep4,gpu_rtx,s5_twist,render,512,12.476,21.012,-1.000,-1.0000

@@ -63,7 +63,7 @@ struct Ex { // DAG exporter: id -> tK
         case libfive::Opcode::OP_MAX:e="max("+a+","+b+")";break;
         case libfive::Opcode::OP_ATAN2:e="atan2("+a+","+b+")";break;
         case libfive::Opcode::OP_POW:e=(mode!=1)?"pow("+a+","+b+")":"("+a+"^"+b+")";break;
-        case libfive::Opcode::OP_NTH_ROOT:e=(mode!=1)?("pow("+a+",1.0/"+b+")"):("("+a+"^(1.0/"+b+"))");break;
+        case libfive::Opcode::OP_NTH_ROOT:e=(mode!=1)?("nth_root("+a+","+b+")"):("nth_root("+a+","+b+")");break;
         case libfive::Opcode::OP_MOD:e="mod("+a+","+b+")";break;
         case libfive::Opcode::OP_NANFILL:e=a;break; // best-effort
         default: fprintf(stderr,"unsupported op %s\n",libfive::Opcode::toString(op).c_str()); exit(3);
