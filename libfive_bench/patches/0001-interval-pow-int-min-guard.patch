@@ -1,0 +1,64 @@
+diff --git a/libfive/include/libfive/eval/interval.hpp b/libfive/include/libfive/eval/interval.hpp
+index 4c39468..dc968d6 100644
+--- a/libfive/include/libfive/eval/interval.hpp
++++ b/libfive/include/libfive/eval/interval.hpp
+@@ -22,6 +22,9 @@ You can obtain one at http://mozilla.org/MPL/2.0/.
+ #pragma warning(pop)
+ #endif
+ 
++#include <cmath>
++#include <limits>
++
+ namespace libfive {
+ 
+ /*  The Interval class wraps a boost::numeric::interval<float>, plus a single
+@@ -202,7 +205,21 @@ public:
+ 
+     static Interval pow(const Interval& a, const Interval& b)
+     {
+-        auto bPt = int(b.lower());
++        //  Casting to int is UB unless the value is representable, and on x86
++        //  NaN and out-of-range floats both land on INT_MIN. boost's pow then
++        //  recurses forever, because -INT_MIN == INT_MIN:
++        //      pow(x, pwr < 0) -> multiplicative_inverse(pow(x, -pwr))
++        //  which overflows the stack. NaN does reach here in practice (a NaN
++        //  base propagates into an exponent upstream), so guard the cast and
++        //  fall back to an unbounded maybe-NaN interval: that is sound for the
++        //  octree, which subdivides on it rather than pruning on a bad bound.
++        const float bLower = b.lower();
++        if (!(bLower > -2147483648.0f && bLower < 2147483648.0f))
++        {
++            const float inf = std::numeric_limits<float>::infinity();
++            return Interval(-inf, inf, true);
++        }
++        auto bPt = int(bLower);
+ 
+         auto out = boost::numeric::pow(a.i, bPt);
+         // The behavior of raising zero to a negative power is
+@@ -227,7 +244,25 @@ public:
+ 
+     static Interval nth_root(const Interval& a, const Interval& b)
+     {
+-        auto bPt = int(b.lower());
++        //  Same unguarded cast as pow() above: int(NaN) is INT_MIN, and
++        //  boost's nth_root only rejects k <= 0 via assert(), which is compiled
++        //  out under NDEBUG -- so a Release build reads garbage rather than
++        //  crashing.
++        //
++        //  The bound has to be >= 1, not > 0: real scenes carry fractional
++        //  exponents (hello_world uses b = 0.5, i.e. a^2), and int(0.5) is 0,
++        //  which lands on exactly the k <= 0 case boost only catches by assert.
++        //  Note the truncation is itself lossy -- the array evaluator computes
++        //  powf(a, 1/b) and would return a^2 here, while this path collapses
++        //  b to an int. Bailing out to an unbounded interval keeps the octree
++        //  sound (it subdivides) instead of pruning on a fabricated bound.
++        const float bLower = b.lower();
++        if (!(bLower >= 1.0f && bLower < 2147483648.0f))
++        {
++            const float inf = std::numeric_limits<float>::infinity();
++            return Interval(-inf, inf, true);
++        }
++        auto bPt = int(bLower);
+         auto i = boost::numeric::nth_root(a.i, bPt);
+ 
+         // We can only take multiples-of-two nth roots on negative values

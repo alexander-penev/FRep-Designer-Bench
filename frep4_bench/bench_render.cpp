@@ -77,6 +77,25 @@ int main(int argc, char** argv) {
             }
             double compile_ms = first.compile_ms;
 
+            // Optional PPM dump for visual inspection (FREP4_DUMP_PPM=dir).
+            if (const char* dd = std::getenv("FREP4_DUMP_PPM")) {
+                char path[512];
+                std::snprintf(path, sizeof path, "%s/%s_%s_%d.ppm",
+                              dd, name.c_str(), backend, R);
+                if (FILE* fp = std::fopen(path, "wb")) {
+                    std::fprintf(fp, "P6\n%d %d\n255\n", R, R);
+                    const auto& px = first.rgba;
+                    for (size_t i = 0; i + 3 < px.size(); i += 4)
+                        for (int c = 0; c < 3; ++c) {
+                            float v = px[i + c];
+                            unsigned char u = v <= 0 ? 0 : v >= 1 ? 255
+                                            : (unsigned char)(v * 255.0f + 0.5f);
+                            std::fputc(u, fp);
+                        }
+                    std::fclose(fp);
+                }
+            }
+
             // Sanity: a fast render of a black screen is worthless. Flag frames
             // that are (nearly) empty or contain NaN/inf — this is what catches
             // a scene that "renders" quickly but shows nothing (e.g. an imported

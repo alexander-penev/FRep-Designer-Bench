@@ -4,12 +4,39 @@
 #include "core/compiler/compile_sdf.hpp"
 #include "core/io/scene_io.hpp"
 #include "../common/timing.hpp"
+#include "../common/field_dump.hpp"
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <functional>
 #include <vector>
 using namespace frep;
+
+static std::string scene_stem(std::string p) {
+    auto sl = p.find_last_of('/'); if (sl != std::string::npos) p = p.substr(sl + 1);
+    auto d = p.find_last_of('.');  if (d != std::string::npos) p = p.substr(0, d);
+    return p;
+}
+
 int main(int argc, char** argv) {
+    // Cross-system visual parity: dump min-over-Z orthographic SDF fields on the
+    // shared grid so frep4 / libfive / hyperfun images are pixel-comparable.
+    //   bench_grid --dump-field R Z outdir scene.json...
+    if (argc >= 6 && !std::strcmp(argv[1], "--dump-field")) {
+        int R = std::atoi(argv[2]), Z = std::atoi(argv[3]); const char* dir = argv[4];
+        for (int a = 5; a < argc; ++a) {
+            SceneGraph s = io::load_scene(argv[a]);
+            auto sc = jit::compile_scene_sdf(s);
+            if (!sc) { std::fprintf(stderr, "%s: %s\n", argv[a], sc.error().c_str()); return 2; }
+            auto fn = sc->fn;
+            std::string nm = scene_stem(argv[a]);
+            fdump::dump_field([fn](float x, float y, float z){ return fn(x, y, z); },
+                              R, Z, std::string(dir) + "/" + nm + "_frep4");
+            std::fprintf(stderr, "dumped %s_frep4\n", nm.c_str());
+        }
+        return 0;
+    }
+
     if (argc < 3) { std::fprintf(stderr, "usage: %s N scene.json...\n", argv[0]); return 1; }
     const long N = atol(argv[1]);
     for (int a = 2; a < argc; ++a) {

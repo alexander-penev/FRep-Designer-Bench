@@ -1,0 +1,172 @@
+diff --git a/core/compiler/retarget_nvptx.hpp b/core/compiler/retarget_nvptx.hpp
+index 48a2a2b..9087ac8 100644
+--- a/core/compiler/retarget_nvptx.hpp
++++ b/core/compiler/retarget_nvptx.hpp
+@@ -29,6 +29,7 @@
+ #include <llvm/IR/CallingConv.h>
+ #include <llvm/IR/IRBuilder.h>
+ #include <llvm/IR/IntrinsicInst.h>
++#include <llvm/IR/IntrinsicsNVPTX.h>   // llvm.nvvm.lg2.approx.f / ex2.approx
+ #include <llvm/MC/TargetRegistry.h>
+ #include <llvm/Target/TargetMachine.h>
+ #include <llvm/TargetParser/Triple.h>
+@@ -44,13 +45,16 @@ namespace frep {
+ namespace nvptx_detail {
+ 
+ // The NVPTX backend can select sqrt/fabs/min/max (hardware ops) but NOT the
+-// transcendental intrinsics (llvm.sin/cos): "Cannot select: fsin". libdevice
+-// (__nv_sinf) isn't linked at JIT time, so emitting extern calls to it makes
+-// cuModuleLoadData fail. Instead we inline a self-contained polynomial sin/cos
+-// in IR — no external symbols, portable to any backend. Range-reduce x to
+-// [-π,π] via k = round(x/2π), then a degree-7 (sin) / degree-6 (cos) minimax
+-// polynomial. Accuracy ~1e-6 over the reduced range, far below the 0.0078
+-// parity tolerance.
++// transcendental intrinsics (llvm.sin/cos/exp/log/pow): "Cannot select: fsin".
++// libdevice (__nv_sinf) isn't linked at JIT time, so extern calls to it make
++// cuModuleLoadData fail. We reach the hardware instructions through the NVVM
++// intrinsics instead (sin.approx / cos.approx / ex2.approx / lg2.approx) — see
++// nv_sin/nv_cos/nv_exp2/nv_log2 below.
++//
++// The polynomial sin/cos below is the previous approach, kept for reference /
++// non-NVIDIA reuse. It is NOT used by lower_transcendentals any more: measured
++// against CPU_IR on the sin/cos-heavy gyroid it diverged by 0.70 max, while the
++// hardware sin.approx comes in at 0.0028.
+ inline llvm::Value* build_sin_poly(llvm::IRBuilder<>& b, llvm::Value* x);
+ 
+ inline llvm::Value* range_reduce(llvm::IRBuilder<>& b, llvm::Value* x) {
+@@ -86,10 +90,93 @@ inline llvm::Value* build_cos_poly(llvm::IRBuilder<>& b, llvm::Value* x) {
+     return build_sin_poly(b, b.CreateFAdd(x, llvm::ConstantFP::get(f, 1.5707963267948966)));
+ }
+ 
++//  exp2 and log2 are the only transcendentals NVPTX selects natively
++//  (ex2.approx.f32 / lg2.approx.f32); everything else has to be built on them.
++inline llvm::Value* nv_intr(llvm::IRBuilder<>& b, llvm::Module& mod,
++                            llvm::Intrinsic::ID id, llvm::Value* x) {
++    auto* f = llvm::Intrinsic::getOrInsertDeclaration(&mod, id, {x->getType()});
++    return b.CreateCall(f, {x});
++}
++
++//  Generic llvm.exp2 / llvm.log2 do NOT reliably reach ex2.approx / lg2.approx:
++//  ISel asks for a precise libcall and aborts with "no libcall available for
++//  flog2" (setting `afn` is not enough). The NVVM intrinsics map straight onto
++//  the PTX instructions, so use them directly. ~1 ulp — far inside the 0.02
++//  parity tolerance.
++inline llvm::Value* nv_log2(llvm::IRBuilder<>& b, llvm::Module& mod, llvm::Value* x) {
++    auto* f = llvm::Intrinsic::getOrInsertDeclaration(&mod, llvm::Intrinsic::nvvm_lg2_approx_f);
++    return b.CreateCall(f, {x});
++}
++inline llvm::Value* nv_exp2(llvm::IRBuilder<>& b, llvm::Module& mod, llvm::Value* x) {
++    // ex2 is overloaded in LLVM 22 (nvvm_ex2_approx); lg2 stays f32-only.
++    auto* f = llvm::Intrinsic::getOrInsertDeclaration(&mod, llvm::Intrinsic::nvvm_ex2_approx,
++                                                      {x->getType()});
++    return b.CreateCall(f, {x});
++}
++
++//  sin/cos: NVPTX has sin.approx.f32 / cos.approx.f32 in hardware, reachable
++//  through the NVVM intrinsics — the same instructions the GLSL path ends up
++//  on. Using them instead of the hand-rolled polynomial below puts GPU_IR on
++//  the same footing as GPU_GLSL, which measured markedly closer to CPU_IR on
++//  the sin/cos-heavy gyroid (0.22 vs 0.70 max).
++inline llvm::Value* nv_sin(llvm::IRBuilder<>& b, llvm::Module& mod, llvm::Value* x) {
++    auto* f = llvm::Intrinsic::getOrInsertDeclaration(&mod, llvm::Intrinsic::nvvm_sin_approx_f);
++    return b.CreateCall(f, {x});
++}
++inline llvm::Value* nv_cos(llvm::IRBuilder<>& b, llvm::Module& mod, llvm::Value* x) {
++    auto* f = llvm::Intrinsic::getOrInsertDeclaration(&mod, llvm::Intrinsic::nvvm_cos_approx_f);
++    return b.CreateCall(f, {x});
++}
++
++inline llvm::Value* build_exp(llvm::IRBuilder<>& b, llvm::Module& mod, llvm::Value* x) {
++    // exp(x) = exp2(x * log2(e))
++    llvm::Type* f = x->getType();
++    return nv_exp2(b, mod, b.CreateFMul(x, llvm::ConstantFP::get(f, 1.4426950408889634)));
++}
++
++inline llvm::Value* build_log(llvm::IRBuilder<>& b, llvm::Module& mod, llvm::Value* x) {
++    // log(x) = log2(x) * ln(2)
++    llvm::Type* f = x->getType();
++    return b.CreateFMul(nv_log2(b, mod, x),
++                        llvm::ConstantFP::get(f, 0.6931471805599453));
++}
++
++inline llvm::Value* build_pow(llvm::IRBuilder<>& b, llvm::Module& mod,
++                              llvm::Value* a, llvm::Value* e) {
++    //  powf(a, e) rebuilt from exp2/log2, keeping libm's real-domain semantics
++    //  so the NVPTX path agrees with the CPU JIT rather than merely running:
++    //      a > 0                      ->  |a|^e
++    //      a < 0, e an odd integer    -> -|a|^e
++    //      a < 0, e an even integer   -> +|a|^e
++    //      a < 0, e not an integer    ->  NaN
++    //  Naively emitting exp2(e*log2(a)) would NaN on every negative base and
++    //  silently diverge from CPU_IR on scenes that raise a signed field to a
++    //  power (hello_world does, via nth_root with b = 0.5, i.e. a^2).
++    llvm::Type* f = a->getType();
++    auto C = [&](double v) { return llvm::ConstantFP::get(f, v); };
++
++    llvm::Value* mag = nv_intr(b, mod, llvm::Intrinsic::fabs, a);
++    llvm::Value* p   = nv_exp2(b, mod, b.CreateFMul(e, nv_log2(b, mod, mag)));
++
++    llvm::Value* neg   = b.CreateFCmpOLT(a, C(0.0));
++    llvm::Value* fl    = nv_intr(b, mod, llvm::Intrinsic::floor, e);
++    llvm::Value* isInt = b.CreateFCmpOEQ(fl, e);
++    // odd(e) <=> e - 2*floor(e/2) == 1
++    llvm::Value* flHalf = nv_intr(b, mod, llvm::Intrinsic::floor, b.CreateFMul(e, C(0.5)));
++    llvm::Value* odd    = b.CreateFCmpOEQ(b.CreateFSub(e, b.CreateFMul(flHalf, C(2.0))),
++                                          C(1.0));
++
++    llvm::Value* r = b.CreateSelect(b.CreateAnd(neg, b.CreateAnd(isInt, odd)),
++                                    b.CreateFNeg(p), p);
++    return b.CreateSelect(b.CreateAnd(neg, b.CreateNot(isInt)),
++                          llvm::ConstantFP::getNaN(f), r);
++}
++
+ inline void lower_transcendentals(llvm::Module& mod) {
+     llvm::Type* f32 = llvm::Type::getFloatTy(mod.getContext());
+ 
+-    struct Job { llvm::CallInst* ci; int kind; };  // 0=sin, 1=cos
++    enum { KSin, KCos, KExp, KLog, KPow };
++    struct Job { llvm::CallInst* ci; int kind; };
+     std::vector<Job> jobs;
+     for (auto& F : mod) {
+         if (F.isDeclaration()) continue;  // no body to scan
+@@ -99,17 +186,35 @@ inline void lower_transcendentals(llvm::Module& mod) {
+                     auto* fn = ci->getCalledFunction();
+                     if (!fn || !fn->isIntrinsic() || ci->arg_size() < 1) continue;
+                     if (ci->getArgOperand(0)->getType() != f32) continue;
+-                    if (fn->getIntrinsicID() == llvm::Intrinsic::sin)
+-                        jobs.push_back({ci, 0});
+-                    else if (fn->getIntrinsicID() == llvm::Intrinsic::cos)
+-                        jobs.push_back({ci, 1});
++                    switch (fn->getIntrinsicID()) {
++                    case llvm::Intrinsic::sin: jobs.push_back({ci, KSin}); break;
++                    case llvm::Intrinsic::cos: jobs.push_back({ci, KCos}); break;
++                    case llvm::Intrinsic::exp: jobs.push_back({ci, KExp}); break;
++                    case llvm::Intrinsic::log: jobs.push_back({ci, KLog}); break;
++                    // llvm.pow has no NVPTX lowering either: it reaches ISel as
++                    // `fpow` and aborts with "Cannot select". Any scene with a
++                    // smooth blend (h^k) or an nth_root hits this.
++                    case llvm::Intrinsic::pow:
++                        if (ci->arg_size() == 2 &&
++                            ci->getArgOperand(1)->getType() == f32)
++                            jobs.push_back({ci, KPow});
++                        break;
++                    default: break;
++                    }
+                 }
+     }
+ 
+     for (auto& j : jobs) {
+         llvm::IRBuilder<> b(j.ci);
+         llvm::Value* x = j.ci->getArgOperand(0);
+-        llvm::Value* r = (j.kind == 0) ? build_sin_poly(b, x) : build_cos_poly(b, x);
++        llvm::Value* r = nullptr;
++        switch (j.kind) {
++        case KSin: r = nv_sin(b, mod, x);                               break;
++        case KCos: r = nv_cos(b, mod, x);                               break;
++        case KExp: r = build_exp(b, mod, x);                            break;
++        case KLog: r = build_log(b, mod, x);                            break;
++        case KPow: r = build_pow(b, mod, x, j.ci->getArgOperand(1));    break;
++        }
+         j.ci->replaceAllUsesWith(r);
+         j.ci->eraseFromParent();
+     }

@@ -1,0 +1,43 @@
+diff --git a/core/compiler/compile_sdf.hpp b/core/compiler/compile_sdf.hpp
+index 1c9c0dd..d91bcef 100644
+--- a/core/compiler/compile_sdf.hpp
++++ b/core/compiler/compile_sdf.hpp
+@@ -10,6 +10,8 @@
+ #include "core/frep/expr_ast.hpp"
+ #include "core/compiler/node_interval.hpp"
+ #include <llvm/IR/Verifier.h>
++#include <llvm/TargetParser/Host.h>   // llvm::sys::getHostCPUFeatures
++#include <llvm/ADT/StringMap.h>
+ #include <expected>
+ #include <memory>
+ #include <vector>
+@@ -44,6 +46,19 @@ compile_scene_sdf(const SceneGraph& scene) {
+ // error otherwise so the caller can fall back to the scalar path.
+ using SceneSdfSimdFn = void (*)(const float*, const float*, const float*, float*);
+ 
++// Float-lane width for SIMD SDF evaluation, from the host CPU: AVX-512F -> 16,
++// AVX2 -> 8, SSE2 -> 4. Ported from frep 4.54: width-16 is ~1.12-1.37x faster
++// than 8 on polynomial/CSG scenes on an AVX-512 host; on AVX2 hosts it resolves
++// to 8, unchanged. (getHostCPUFeatures returns a StringMap<bool> in LLVM 22.)
++inline unsigned native_simd_width() {
++    auto feats = llvm::sys::getHostCPUFeatures();
++    auto has = [&](const char* f){ auto it = feats.find(f); return it != feats.end() && it->second; };
++    if (has("avx512f")) return 16;
++    if (has("avx2"))    return 8;
++    if (has("sse2"))    return 4;
++    return 8;   // safe default
++}
++
+ struct CompiledSdfSimd {
+     SceneSdfSimdFn             fn = nullptr;
+     unsigned                   width = 0;
+@@ -51,7 +66,8 @@ struct CompiledSdfSimd {
+ };
+ 
+ inline std::expected<CompiledSdfSimd, std::string>
+-compile_scene_sdf_simd(const SceneGraph& scene, unsigned width = 8) {
++compile_scene_sdf_simd(const SceneGraph& scene, unsigned width = 0) {
++    if (width == 0) width = native_simd_width();   // 0 = pick from host CPU
+     std::vector<FRepNode::Ptr> geoms;
+     for (auto& [id, obj] : scene.objects())
+         if (obj.visible) geoms.push_back(obj.geometry);

@@ -9,6 +9,7 @@
 #include <libfive/tree/archive.hpp>
 #include <libfive/tree/data.hpp>
 #include <libfive/eval/eval_array.hpp>
+#include "../common/field_dump.hpp"
 #include <libfive/render/discrete/heightmap.hpp>
 #include <libfive/render/discrete/voxels.hpp>
 #include <atomic>
@@ -79,7 +80,46 @@ struct Ex { // DAG exporter: id -> tK
 };
 int main(int argc, char** argv) {
     auto scenes = canonical_scenes();
+    { auto c = complex_scenes(); for (auto& s : c) scenes.push_back(s); }  // valid complex SDFs
     auto add_files=[&](int from){for(int i=from;i<argc;++i)scenes.emplace_back(base(argv[i]),load(argv[i]));};
+    // Cross-system visual parity: min-over-Z orthographic SDF field on the shared
+    // grid, same projection as frep4/hyperfun -> pixel-comparable images.
+    //   bench_libfive --dump-field R Z outdir [extra.frep ...]
+    if (argc>=5 && !strcmp(argv[1],"--dump-field")) {
+        int R=atoi(argv[2]), Z=atoi(argv[3]); const char* dir=argv[4];
+        add_files(5);
+        for (auto& [n,t]:scenes){
+            libfive::ArrayEvaluator e(t);
+            fdump::dump_field([&e](float x,float y,float z){
+                e.set({x,y,z},0); return e.values(1)(0); }, R, Z,
+                std::string(dir)+"/"+n+"_libfive");
+            std::fprintf(stderr,"dumped %s_libfive\n", n.c_str());
+        }
+        return 0;
+    }
+    // Ground-truth heightmap render (libfive's native interval evaluator) dumped
+    // to PPM, to see whether a .frep archive is a valid SDF at all.
+    //   bench_libfive --render-img R outdir [extra.frep ...]
+    if (argc>=4 && !strcmp(argv[1],"--render-img")) {
+        int R=atoi(argv[2]); const char* dir=argv[3]; add_files(4);
+        for (auto& [n,t]:scenes){
+            libfive::Voxels vox({-1.6f,-1.6f,-1.6f},{1.6f,1.6f,1.6f},R/3.2f);
+            std::atomic_bool ab(false);
+            auto h=libfive::Heightmap::render(t,vox,ab,8);
+            const auto& d=h->depth; int H=d.rows(), W=d.cols();
+            float lo=1e30f,hi=-1e30f; long hit=0;
+            for(int i=0;i<H;++i)for(int j=0;j<W;++j){float v=d(i,j);
+                if(std::isfinite(v)){lo=std::min(lo,v);hi=std::max(hi,v);++hit;}}
+            std::string p=std::string(dir)+"/"+n+"_lfheight.ppm";
+            FILE* fp=std::fopen(p.c_str(),"wb"); std::fprintf(fp,"P6\n%d %d\n255\n",W,H);
+            for(int i=0;i<H;++i)for(int j=0;j<W;++j){float v=d(i,j);
+                unsigned char c = std::isfinite(v)&&hi>lo ? (unsigned char)(40+215*(v-lo)/(hi-lo)) : 0;
+                std::fputc(c,fp);std::fputc(c,fp);std::fputc(std::isfinite(v)?c:60,fp);}
+            std::fclose(fp);
+            std::fprintf(stderr,"%s: %ld/%d surface px (%.1f%%)\n",n.c_str(),hit,H*W,100.0*hit/(H*W));
+        }
+        return 0;
+    }
     if (argc>=3 && !strcmp(argv[1],"--emit-frep")) {
         for (auto& [n,t]:scenes){std::ofstream f(std::string(argv[2])+"/"+n+".frep",std::ios::binary);libfive::Archive a(t);a.serialize(f);}
         return 0;

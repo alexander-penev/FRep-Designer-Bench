@@ -1,6 +1,8 @@
 #!/bin/sh
 # Samples nvidia-smi power.draw@100ms around CMD. Passes CMD stdout through.
 # Appends a CSV energy row (system=mpr,metric=energy) with avg_W/elapsed/joules.
+# awk's %f honours LC_NUMERIC; a comma-decimal locale would split the CSV row.
+LC_ALL=C; export LC_ALL
 LOG=$(mktemp)
 nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits -lms 100 >"$LOG" 2>/dev/null &
 SMI=$!

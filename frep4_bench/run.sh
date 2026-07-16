@@ -7,12 +7,17 @@ mkdir -p scenes/frep4
 LB=libfive_bench/build/bench_libfive
 if [ -x "$LB" ]; then
   export LD_LIBRARY_PATH="${LIBFIVE_ROOT:-$(pwd)/libfive}/build/libfive/src:$LD_LIBRARY_PATH"
-  for f in scenes/libfive/architecture.frep scenes/libfive/hello_world.frep \
-           scenes/libfive/involute_gear_2d.frep scenes/libfive/involute_gear_3d.frep; do
-    [ -f "$f" ] && $LB --export-let "$f" "scenes/frep4/$(basename "$f" .frep).let" || true
+  # Complex scenes (valid SDFs, emitted by libfive_bench --emit-frep). The old
+  # imported archives were non-SDF (atan2/division roots) and evaluated to NaN
+  # everywhere; see scenes/MATH.md.
+  for f in scenes/libfive/c1_gear.frep scenes/libfive/c2_colonnade.frep; do
+    # Scene-prep chatter goes to stderr; only CSV rows may reach stdout, which
+    # run_all.sh tees straight into results.csv.
+    [ -f "$f" ] && $LB --export-let "$f" "scenes/frep4/$(basename "$f" .frep).let" >&2 || true
   done
 fi
-frep4_bench/build/frep4_gen_scenes scenes/frep4
+frep4_bench/build/frep4_gen_scenes scenes/frep4 >&2
 $TASKSET frep4_bench/build/frep4_bench_grid 193 scenes/frep4/s?_*.json
-$TASKSET frep4_bench/build/frep4_bench_grid 65 scenes/frep4/architecture.json scenes/frep4/hello_world.json \
-    scenes/frep4/involute_gear_2d.json scenes/frep4/involute_gear_3d.json
+# Complex scenes at 193 too, so they match libfive_bench's grid (a smaller grid
+# here would compare against libfive's 193^3 and read as a false win).
+$TASKSET frep4_bench/build/frep4_bench_grid 193 scenes/frep4/c1_gear.json scenes/frep4/c2_colonnade.json

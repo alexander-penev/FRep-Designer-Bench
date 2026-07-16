@@ -1,2 +1,17 @@
 *.ppm
 *_bench/build_render/
+
+# Build trees
+*_bench/build/
+
+# Upstream sources fetched by common/fetch.sh into these placeholder dirs.
+# Ignore the fetched contents but keep the .gitkeep placeholders tracked, so a
+# fresh clone still has the directories that resolve_root fetches into.
+/frep4/*
+/hyperfun/*
+/libfive/*
+/mpr/*
+!/frep4/.gitkeep
+!/hyperfun/.gitkeep
+!/libfive/.gitkeep
+!/mpr/.gitkeep

@@ -1,0 +1,182 @@
+diff --git a/core/frep/custom_expr.cpp b/core/frep/custom_expr.cpp
+index 57b1a25..fd18e59 100644
+--- a/core/frep/custom_expr.cpp
++++ b/core/frep/custom_expr.cpp
+@@ -103,7 +103,29 @@ llvm::Value* CustomExprCompiler::gen_call(const expr::Node& n) {
+     if (name == "ceil")  return unary(llvm::Intrinsic::ceil);
+     if (name == "min")   return binary(llvm::Intrinsic::minnum);
+     if (name == "max")   return binary(llvm::Intrinsic::maxnum);
+-    if (name == "pow")   return binary(llvm::Intrinsic::pow);
++    //  Domain-safe power: copysign(|a|^e, a). Raw IEEE pow(a<0, non-integer e)
++    //  is NaN, and the converted gear/architecture/hello_world scenes raise a
++    //  signed field to fractional powers (via nth_root b=0.3/1.5), so the naive
++    //  form NaNs over the whole volume. The odd extension keeps them finite.
++    //  For a >= 0 it is identical to raw pow, so canonical scenes (blend h^k,
++    //  h >= 0) are unaffected. NOTE: libfive does NOT do this — it returns NaN
++    //  there — so enabling this makes frep4 DIVERGE from libfive on those
++    //  scenes rather than agree. Gated on FREP4_SAFE_POW so the default stays
++    //  bit-identical to libfive for honest cross-system parity.
++    auto pow_safe = [&](llvm::Value* base, llvm::Value* e) -> llvm::Value* {
++        auto* P = llvm::Intrinsic::getOrInsertDeclaration(
++                mod_, llvm::Intrinsic::pow, {b.getFloatTy()});
++        if (!std::getenv("FREP4_SAFE_POW"))
++            return b.CreateCall(P, {base, e});
++        auto* mag = frep::llvm_compat::unary_intrinsic(b, llvm::Intrinsic::fabs, base);
++        auto* p   = b.CreateCall(P, {mag, e});
++        return b.CreateBinaryIntrinsic(llvm::Intrinsic::copysign, p, base);
++    };
++    if (name == "pow")   return pow_safe(args[0], args[1]);
++    if (name == "nth_root") {   // a^(1/b)
++        auto* one = llvm::ConstantFP::get(b.getFloatTy(), 1.0);
++        return pow_safe(args[0], b.CreateFDiv(one, args[1]));
++    }
+     // Inverse-trig / atan2 / mod: no LLVM intrinsics -> libm calls.
+     // CPU-JIT resolves them from the process; GPU_IR (NVPTX) needs
+     // self-contained transcendentals, so these are CPU-only for now.
+@@ -184,9 +206,9 @@ CustomExprCompiler::gen_ival(const expr::Node& n) {
+     auto& b = *b_;
+     auto k = [&](float v){ return fc(v); };
+     auto mn = [&](llvm::Value* a, llvm::Value* c){
+-        return b.CreateCall(llvm::Intrinsic::getDeclaration(mod_,llvm::Intrinsic::minnum,{b.getFloatTy()}),{a,c}); };
++        return b.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(mod_,llvm::Intrinsic::minnum,{b.getFloatTy()}),{a,c}); };
+     auto mx = [&](llvm::Value* a, llvm::Value* c){
+-        return b.CreateCall(llvm::Intrinsic::getDeclaration(mod_,llvm::Intrinsic::maxnum,{b.getFloatTy()}),{a,c}); };
++        return b.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(mod_,llvm::Intrinsic::maxnum,{b.getFloatTy()}),{a,c}); };
+     std::pair<llvm::Value*,llvm::Value*> out{nullptr,nullptr};
+     switch (n.kind) {
+         case Kind::Number: out = {k(n.num), k(n.num)}; break;
+@@ -239,11 +261,11 @@ CustomExprCompiler::gen_call_ival(const expr::Node& n) {
+     auto& b = *b_;
+     const auto& nm = n.ident;
+     auto I=[&](llvm::Intrinsic::ID id,llvm::Value* v){
+-        return b.CreateCall(llvm::Intrinsic::getDeclaration(mod_,id,{b.getFloatTy()}),{v}); };
++        return b.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(mod_,id,{b.getFloatTy()}),{v}); };
+     auto mn=[&](llvm::Value* a,llvm::Value* c){
+-        return b.CreateCall(llvm::Intrinsic::getDeclaration(mod_,llvm::Intrinsic::minnum,{b.getFloatTy()}),{a,c}); };
++        return b.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(mod_,llvm::Intrinsic::minnum,{b.getFloatTy()}),{a,c}); };
+     auto mx=[&](llvm::Value* a,llvm::Value* c){
+-        return b.CreateCall(llvm::Intrinsic::getDeclaration(mod_,llvm::Intrinsic::maxnum,{b.getFloatTy()}),{a,c}); };
++        return b.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(mod_,llvm::Intrinsic::maxnum,{b.getFloatTy()}),{a,c}); };
+     std::vector<std::pair<llvm::Value*,llvm::Value*>> a;
+     for (auto& c:n.children){ auto p=gen_ival(*c); if(!p.first) return {}; a.push_back(p); }
+     if (nm=="sqrt"){ auto lo=mx(a[0].first, fc(0.0f));
+@@ -255,9 +277,14 @@ CustomExprCompiler::gen_call_ival(const expr::Node& n) {
+     if (nm=="min") return {mn(a[0].first,a[1].first), mn(a[0].second,a[1].second)};
+     if (nm=="max") return {mx(a[0].first,a[1].first), mx(a[0].second,a[1].second)};
+     if (nm=="pow"){ // constant exponent, non-negative base (holds for the blend h^k)
+-        auto*P=llvm::Intrinsic::getDeclaration(mod_,llvm::Intrinsic::pow,{b.getFloatTy()});
++        auto*P=llvm::Intrinsic::getOrInsertDeclaration(mod_,llvm::Intrinsic::pow,{b.getFloatTy()});
+         auto lo=mx(a[0].first,fc(0.0f)), hi=mx(a[0].second,fc(0.0f));
+         return {b.CreateCall(P,{lo,a[1].first}), b.CreateCall(P,{hi,a[1].second})}; }
++    if (nm=="nth_root"){ // a^(1/b), same clamped-base convention as pow above
++        auto*P=llvm::Intrinsic::getOrInsertDeclaration(mod_,llvm::Intrinsic::pow,{b.getFloatTy()});
++        auto lo=mx(a[0].first,fc(0.0f)), hi=mx(a[0].second,fc(0.0f));
++        auto elo=b.CreateFDiv(fc(1.0f),a[1].first), ehi=b.CreateFDiv(fc(1.0f),a[1].second);
++        return {b.CreateCall(P,{lo,elo}), b.CreateCall(P,{hi,ehi})}; }
+     // trig etc.: not yet interval-supported
+     auto Fc=[&](float v){ return fc(v); };
+     auto Sin=[&](llvm::Value* v){ return I(llvm::Intrinsic::sin,v); };
+@@ -371,7 +398,7 @@ struct VPoly {
+     llvm::Value* fma(llvm::Value* a, llvm::Value* x, llvm::Value* c){
+         return b.CreateFAdd(b.CreateFMul(a, x), c); }
+     llvm::Value* intr(llvm::Intrinsic::ID id, llvm::Value* x){
+-        return b.CreateCall(llvm::Intrinsic::getDeclaration(
++        return b.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(
+             b.GetInsertBlock()->getModule(), id, {vt}), {x}); }
+     // sin/cos via reduction to [-pi/4,pi/4] + quadrant swap (accurate to ~1e-6).
+     void sincos(llvm::Value* x, llvm::Value** so, llvm::Value** co){
+@@ -450,7 +477,7 @@ llvm::Value* CustomExprCompiler::gen_call_vec(const expr::Node& n) {
+     }
+     auto* vt = vty(*ctx_, vw_);
+     auto vintr = [&](llvm::Intrinsic::ID id) {
+-        auto* f = llvm::Intrinsic::getDeclaration(mod_, id, {vt});
++        auto* f = llvm::Intrinsic::getOrInsertDeclaration(mod_, id, {vt});
+         return a.size() == 2 ? b.CreateCall(f, {a[0], a[1]})
+                              : b.CreateCall(f, {a[0]});
+     };
+@@ -465,6 +492,11 @@ llvm::Value* CustomExprCompiler::gen_call_vec(const expr::Node& n) {
+     if (nm == "floor") return vintr(llvm::Intrinsic::floor);
+     if (nm == "ceil")  return vintr(llvm::Intrinsic::ceil);
+     if (nm == "pow")   return vintr(llvm::Intrinsic::pow);
++    if (nm == "nth_root") {   // a^(1/b)
++        auto* P = llvm::Intrinsic::getOrInsertDeclaration(mod_, llvm::Intrinsic::pow, {vt});
++        auto* one = llvm::ConstantFP::get(vt, 1.0);
++        return b.CreateCall(P, {a[0], b.CreateFDiv(one, a[1])});
++    }
+     if (nm == "min")   return vintr(llvm::Intrinsic::minnum);
+     if (nm == "max")   return vintr(llvm::Intrinsic::maxnum);
+     if (nm == "tan") { llvm::Value* s; llvm::Value* c; vp.sincos(a[0], &s, &c);
+@@ -474,7 +506,7 @@ llvm::Value* CustomExprCompiler::gen_call_vec(const expr::Node& n) {
+     if (nm == "atan")  return vp.atan(a[0]);
+     if (nm == "atan2") return vp.atan2(a[0], a[1]);
+     if (nm == "mod") {  // x - floor(x/y)*y  (matches fmod for y>0; SIMD-friendly)
+-        auto* ff = llvm::Intrinsic::getDeclaration(mod_, llvm::Intrinsic::floor, {vt});
++        auto* ff = llvm::Intrinsic::getOrInsertDeclaration(mod_, llvm::Intrinsic::floor, {vt});
+         auto flq = b.CreateCall(ff, {b.CreateFDiv(a[0], a[1])});
+         return b.CreateFSub(a[0], b.CreateFMul(flq, a[1]));
+     }
+@@ -648,6 +680,7 @@ float CustomExprNode::eval_ast(const expr::Node& n, float x, float y, float z) {
+             if (name == "ceil")  return std::ceil(a0);
+             float a1 = eval_ast(*n.children[1], x, y, z);
+             if (name == "pow")   return std::pow(a0, a1);
++            if (name == "nth_root") return std::pow(a0, 1.0f / a1);
+             if (name == "min")   return std::fmin(a0, a1);
+             if (name == "max")   return std::fmax(a0, a1);
+             if (name == "atan2") return std::atan2(a0, a1);
+@@ -711,6 +744,15 @@ void CustomExprNode::emit_glsl_ast(std::ostream& out, const expr::Node& n) {
+             return;
+         }
+         case Kind::Call: {
++            // GLSL has no nth_root; expand it to the pow() it is defined as.
++            if (n.ident == std::string("nth_root")) {
++                out << "pow(";
++                emit_glsl_ast(out, *n.children[0]);
++                out << ", 1.0 / (";
++                emit_glsl_ast(out, *n.children[1]);
++                out << "))";
++                return;
++            }
+             // All supported functions have matching names in GLSL.
+             // `abs` works for floats; `pow/min/max` accept two scalars.
+             // GLSL dialect: atan2(y,x) -> atan(y,x); mod() is GLSL mod.
+diff --git a/core/frep/expr_ast.cpp b/core/frep/expr_ast.cpp
+index 20e800f..693668d 100644
+--- a/core/frep/expr_ast.cpp
++++ b/core/frep/expr_ast.cpp
+@@ -235,6 +235,7 @@ float apply_func(const std::string& name, const std::vector<float>& args) {
+     if (name == "floor") return std::floor(args[0]);
+     if (name == "ceil")  return std::ceil(args[0]);
+     if (name == "pow")   return std::pow(args[0], args[1]);
++    if (name == "nth_root") return std::pow(args[0], 1.0f / args[1]);
+     if (name == "min")   return std::fmin(args[0], args[1]);
+     if (name == "max")   return std::fmax(args[0], args[1]);
+     return std::nan("");
+diff --git a/core/frep/expr_ast.hpp b/core/frep/expr_ast.hpp
+index a1c0f5c..72baf7d 100644
+--- a/core/frep/expr_ast.hpp
++++ b/core/frep/expr_ast.hpp
+@@ -161,6 +161,9 @@ inline int builtin_arity(const std::string& name) {
+     if (name == "asin"  ) return 1;
+     if (name == "acos"  ) return 1;
+     if (name == "pow"   ) return 2;
++    // nth_root(a, b) == a^(1/b), matching libfive's array evaluator. Note b is
++    // a plain float, not an integer: converted scenes carry b = 0.5 (i.e. a^2).
++    if (name == "nth_root") return 2;
+     if (name == "atan2" ) return 2;
+     if (name == "mod"   ) return 2;
+     if (name == "min"   ) return 2;
+diff --git a/core/gpu/glsl_interval.hpp b/core/gpu/glsl_interval.hpp
+index ef536d5..03c1a1c 100644
+--- a/core/gpu/glsl_interval.hpp
++++ b/core/gpu/glsl_interval.hpp
+@@ -113,6 +113,10 @@ private:
+         if (f == "min")   return tmp("min(" + a[0] + ", " + a[1] + ")");
+         if (f == "max")   return tmp("max(" + a[0] + ", " + a[1] + ")");
+         if (f == "pow")   return tmp("ival_pow(" + a[0] + ", " + a[1] + ")");
++        // nth_root(a,b) == a^(1/b); reciprocal of a positive interval flips ends.
++        if (f == "nth_root")
++            return tmp("ival_pow(" + a[0] + ", vec2(1.0 / " + a[1] + ".y, 1.0 / "
++                                   + a[1] + ".x))");
+         if (f == "sin")   return tmp("ival_sin(" + a[0] + ")");
+         if (f == "cos")   return tmp("ival_cos(" + a[0] + ")");
+         if (f == "tan")   return tmp("ival_tan(" + a[0] + ")");

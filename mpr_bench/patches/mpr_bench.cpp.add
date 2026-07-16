@@ -36,6 +36,31 @@ int main(int argc, char** argv) {
     for (int size : sizes) {
         mpr::Context c(size);
         c.render3D(tape, T);                                   // warmup
+        // Optional depth dump (MPR_DUMP_PPM=dir): filled[] is the per-pixel
+        // surface depth (0 = background), in cudaMallocManaged memory, so it is
+        // host-readable after a sync. Lets us confirm mpr renders the SAME
+        // geometry as the other systems — mpr exposes no scalar SDF, so this
+        // occupancy/depth image is the only cross-system parity handle it has.
+        if (const char* dd = std::getenv("MPR_DUMP_PPM")) {
+            cudaDeviceSynchronize();
+            const uint32_t* nrm = c.normals.get();       // packed normal, 0 = background
+            long hit = 0;
+            char path[512];
+            std::snprintf(path, sizeof path, "%s/%s_mpr_%d.ppm", dd, name.c_str(), size);
+            if (FILE* fp = std::fopen(path, "wb")) {
+                std::fprintf(fp, "P6\n%d %d\n255\n", size, size);
+                for (int i = 0; i < size * size; ++i) {
+                    uint32_t v = nrm[i];
+                    if (v) { ++hit;
+                        std::fputc(v & 0xff, fp); std::fputc((v >> 8) & 0xff, fp);
+                        std::fputc((v >> 16) & 0xff, fp); }
+                    else { std::fputc(120, fp); std::fputc(150, fp); std::fputc(210, fp); }
+                }
+                std::fclose(fp);
+            }
+            std::fprintf(stderr, "mpr %s: %ld/%d surface px (%.1f%%)\n",
+                         name.c_str(), hit, size * size, 100.0 * hit / (size * size));
+        }
         const int reps = 5;
         std::vector<double> ms;
         for (int r = 0; r < reps; ++r) {

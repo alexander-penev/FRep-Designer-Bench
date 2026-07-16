@@ -15,3 +15,22 @@ s5_twist  : w = 1.2 ; xt =  x cos(wz) + y sin(wz) ; yt = -x sin(wz) + y cos(wz)
 
 All systems implement these via primitive ops (min/max/abs/sqrt/sin/cos) only - no native
 blend/twist nodes - so every system evaluates the same expression tree.
+
+# Complex scenes (larger DAGs, same cross-system contract)
+
+Defined in libfive_bench/scenes_trees.hpp (complex_scenes()) and emitted to every
+system through the same DAG->text export path as the canonical set. Built only from
+min/max/abs/sqrt and constant rotations, so they are valid signed distance fields
+(finite everywhere, f<=0 inside) that every backend evaluates bit-identically.
+
+c1_gear      : disc body max(sqrt(x^2+y^2)-0.85, |z|-0.22) minus a central bore,
+               union of 18 radial teeth (rotated boxes). ~440 nodes.
+c2_colonnade : floor + roof slabs joined by a 5x5 grid of columns
+               (cylinders max(sqrt((x-cx)^2+(y-cy)^2)-0.11, |z|-0.78)). ~410 nodes.
+
+These REPLACE the original imported archives (architecture / hello_world /
+involute_gear / prospero / bear). Those .frep files were not signed distance fields
+- their root ops were atan2 and division, so they evaluate to NaN across the whole
+domain and every evaluator, including libfive's own interval heightmap renderer,
+draws them empty (0% surface). Any throughput measured on them was timing NaN
+arithmetic, not geometry. Removed.
