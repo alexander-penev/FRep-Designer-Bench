@@ -1,8 +1,8 @@
 diff --git a/core/compiler/codegen.cpp b/core/compiler/codegen.cpp
-index 82bd26a..33820ea 100644
+index 82bd26a..5a109af 100644
 --- a/core/compiler/codegen.cpp
 +++ b/core/compiler/codegen.cpp
-@@ -2827,6 +2827,285 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
+@@ -2827,6 +2827,289 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
      return emit_tracer(scene, sdf_fn, normal_fn, shader_fn, mat_fn);
  }
  
@@ -250,7 +250,11 @@ index 82bd26a..33820ea 100644
 +    // Sky gradient on miss, matching the scalar path: mix(horizon, top, s),
 +    // s = 0.5 + 0.5*ray_dir.y; horizon {0.6,0.7,0.85}, top {0.4,0.5,0.7}.
 +    // Final colour clamped to [0,1] (the scalar path does no gamma, just clamp).
-+    auto* skyS = b.CreateFAdd(fcv(0.5f), b.CreateFMul(fcv(0.5f), DYp));
++    // The scalar sky uses uv_y (NDC pixel y = 1 - 2*py/ih), not the normalized
++    // ray-dir y — matching it removes a systematic gradient offset over the whole
++    // background.
++    auto* uvY  = b.CreateFSub(fcv(1.0f), b.CreateFDiv(b.CreateFMul(fcv(2.0f), pyf), ihV));
++    auto* skyS = b.CreateFAdd(fcv(0.5f), b.CreateFMul(fcv(0.5f), uvY));
 +    auto skyC = [&](float hz, float tp){ return b.CreateFAdd(fcv(hz), b.CreateFMul(fcv(tp-hz), skyS)); };
 +    auto clamp01 = [&](llvm::Value* v){
 +        return frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::minnum,
@@ -288,45 +292,3 @@ index 82bd26a..33820ea 100644
  // ─────────────────────────────────────────────────────────────────────────────
  // emit_gpu_kernel — per-pixel CUDA/NVPTX kernel
  //
-diff --git a/core/compiler/codegen.hpp b/core/compiler/codegen.hpp
-index 0e7310c..23f9f9c 100644
---- a/core/compiler/codegen.hpp
-+++ b/core/compiler/codegen.hpp
-@@ -223,6 +223,13 @@ public:
-     llvm::Function* emit_render_tile(const SceneGraph& scene,
-                                      SceneSdfMode mode = SceneSdfMode::Inlined);
- 
-+    // Approach B — CPU vector (W-wide) render_tile emitted in IR. Same signature
-+    // as emit_render_tile; selected behind FREP4_VEC_RENDER. Stage 1: masked
-+    // march + central-difference normals + single-light Lambert.
-+    llvm::Function* emit_render_tile_vec(const SceneGraph& scene,
-+                                         SceneSdfMode mode = SceneSdfMode::Inlined,
-+                                         unsigned W = 8);
-+
-     // Emit a per-pixel GPU compute kernel ("render_tile") for the CUDA/NVPTX
-     // path. It reads the pixel from the thread/block id (NVPTX sreg
-     // intrinsics), maps thread → one pixel, and reuses the full raymarch by
-diff --git a/core/exec/cpu_executor.hpp b/core/exec/cpu_executor.hpp
-index a1db7f7..f952560 100644
---- a/core/exec/cpu_executor.hpp
-+++ b/core/exec/cpu_executor.hpp
-@@ -22,6 +22,7 @@
- #include <string>
- #include <thread>
- #include <vector>
-+#include <cstdlib>
- 
- namespace frep::exec {
- 
-@@ -60,7 +61,10 @@ public:
-             TracerConfig cfg = cfg_;
-             SceneCodegen cg(*ctx, cfg);
-             try {
--                cg.emit_render_tile(scene, mode_);
-+                if (std::getenv("FREP4_VEC_RENDER"))
-+                    cg.emit_render_tile_vec(scene, mode_, 8);   // Approach B (CPU packet)
-+                else
-+                    cg.emit_render_tile(scene, mode_);
-             } catch (const std::exception& e) {
-                 r.error = std::string("codegen: ") + e.what();
-                 return r;
