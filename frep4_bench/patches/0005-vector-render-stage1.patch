@@ -1,8 +1,8 @@
 diff --git a/core/compiler/codegen.cpp b/core/compiler/codegen.cpp
-index 82bd26a..86b396d 100644
+index 82bd26a..7215108 100644
 --- a/core/compiler/codegen.cpp
 +++ b/core/compiler/codegen.cpp
-@@ -2827,6 +2827,192 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
+@@ -2827,6 +2827,211 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
      return emit_tracer(scene, sdf_fn, normal_fn, shader_fn, mat_fn);
  }
  
@@ -158,13 +158,32 @@ index 82bd26a..86b396d 100644
 +    auto* nz = gradN(HX,HY,HZ,2);
 +    auto* ninv = b.CreateFDiv(fcv(1.0f), vlen(nx,ny,nz));
 +    nx = b.CreateFMul(nx,ninv); ny = b.CreateFMul(ny,ninv); nz = b.CreateFMul(nz,ninv);
-+    auto* ndl = b.CreateFAdd(b.CreateFMul(nx,fcv(0.388f)),
-+                  b.CreateFAdd(b.CreateFMul(ny,fcv(0.680f)), b.CreateFMul(nz,fcv(0.622f))));
-+    auto* diff = frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::maxnum, ndl, fcv(0.0f));
-+    auto* shade = b.CreateFAdd(fcv(0.15f), b.CreateFMul(fcv(0.85f), diff));
-+    auto* colR = b.CreateSelect(finalHit, b.CreateFMul(fcv(0.82f), shade), fcv(0.47f));
-+    auto* colG = b.CreateSelect(finalHit, b.CreateFMul(fcv(0.82f), shade), fcv(0.59f));
-+    auto* colB = b.CreateSelect(finalHit, b.CreateFMul(fcv(0.80f), shade), fcv(0.82f));
++    // Stage 3: the scalar path's Blinn-Phong shading with the default material
++    // (albedo 0.8, roughness 0.5 -> shininess 6, metallic 0) and the scene's
++    // first point light (fallback {5,10,5}). ambient = albedo*0.08; per light
++    // Lo += (albedo*ndotl + 0.04*pow(ndoth,shin)). Shadows (Stage 4) and multi-
++    // light are not applied yet, so lit surfaces match but shadowed ones differ.
++    auto vnorm3 = [&](llvm::Value*& x, llvm::Value*& y, llvm::Value*& z){
++        auto* i = b.CreateFDiv(fcv(1.0f), vlen(x,y,z));
++        x = b.CreateFMul(x,i); y = b.CreateFMul(y,i); z = b.CreateFMul(z,i);
++    };
++    llvm::Value* Lx = b.CreateFSub(fcv(5.0f), HX), *Ly = b.CreateFSub(fcv(10.0f), HY), *Lz = b.CreateFSub(fcv(5.0f), HZ);
++    vnorm3(Lx,Ly,Lz);
++    llvm::Value* Vx = b.CreateFSub(OxV, HX), *Vy = b.CreateFSub(OyV, HY), *Vz = b.CreateFSub(OzV, HZ);
++    vnorm3(Vx,Vy,Vz);
++    llvm::Value* Hx = b.CreateFAdd(Lx,Vx), *Hy = b.CreateFAdd(Ly,Vy), *Hz = b.CreateFAdd(Lz,Vz);
++    vnorm3(Hx,Hy,Hz);
++    auto mx0 = [&](llvm::Value* v){ return frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::maxnum, v, fcv(0.0f)); };
++    auto* ndotl = mx0(b.CreateFAdd(b.CreateFMul(nx,Lx), b.CreateFAdd(b.CreateFMul(ny,Ly), b.CreateFMul(nz,Lz))));
++    auto* ndoth = mx0(b.CreateFAdd(b.CreateFMul(nx,Hx), b.CreateFAdd(b.CreateFMul(ny,Hy), b.CreateFMul(nz,Hz))));
++    auto* spec = b.CreateSelect(b.CreateFCmpOGT(ndotl, fcv(0.0f)),
++                    frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::pow, ndoth, fcv(6.0f)), fcv(0.0f));
++    // per-channel: albedo 0.8 (grey); ambient 0.064; diffuse 0.8*ndotl; spec 0.04*spec
++    auto* lit = b.CreateFAdd(fcv(0.064f),
++                  b.CreateFAdd(b.CreateFMul(fcv(0.8f), ndotl), b.CreateFMul(fcv(0.04f), spec)));
++    auto* colR = b.CreateSelect(finalHit, lit, fcv(0.47f));
++    auto* colG = b.CreateSelect(finalHit, lit, fcv(0.59f));
++    auto* colB = b.CreateSelect(finalHit, lit, fcv(0.82f));
 +
 +    for (unsigned l = 0; l < W; ++l) {
 +        auto* idxRaw = b.CreateAdd(base, b.getInt32((int)l));
