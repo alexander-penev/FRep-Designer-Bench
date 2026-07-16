@@ -1,8 +1,8 @@
 diff --git a/core/compiler/codegen.cpp b/core/compiler/codegen.cpp
-index 82bd26a..1b6cb9a 100644
+index 82bd26a..86b396d 100644
 --- a/core/compiler/codegen.cpp
 +++ b/core/compiler/codegen.cpp
-@@ -2827,6 +2827,182 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
+@@ -2827,6 +2827,192 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
      return emit_tracer(scene, sdf_fn, normal_fn, shader_fn, mat_fn);
  }
  
@@ -142,10 +142,20 @@ index 82bd26a..1b6cb9a 100644
 +    auto* HX = b.CreateFAdd(OxV, b.CreateFMul(Tphi,DXp));
 +    auto* HY = b.CreateFAdd(OyV, b.CreateFMul(Tphi,DYp));
 +    auto* HZ = b.CreateFAdd(OzV, b.CreateFMul(Tphi,DZp));
-+    auto* h = fcv(1e-3f);
-+    auto* nx = b.CreateFSub(sdf(b.CreateFAdd(HX,h),HY,HZ), sdf(b.CreateFSub(HX,h),HY,HZ));
-+    auto* ny = b.CreateFSub(sdf(HX,b.CreateFAdd(HY,h),HZ), sdf(HX,b.CreateFSub(HY,h),HZ));
-+    auto* nz = b.CreateFSub(sdf(HX,HY,b.CreateFAdd(HZ,h)), sdf(HX,HY,b.CreateFSub(HZ,h)));
++    // Stage 2: analytic normals via forward-mode AD (same as the scalar path),
++    // three seeded gradient evaluations instead of six finite differences. The
++    // node codegen_grad vectorises through CgCtx.width, so the whole gradient is
++    // W-wide; .dot is the directional derivative along the seed = one component.
++    auto gradN = [&](llvm::Value* X, llvm::Value* Y, llvm::Value* Z, int axis) -> llvm::Value* {
++        CgCtx cg{ctx_, *mod_, b}; cg.width = W;
++        FRepNode::DualVal dx{X, axis==0 ? fcv(1.0f) : fcv(0.0f)},
++                          dy{Y, axis==1 ? fcv(1.0f) : fcv(0.0f)},
++                          dz{Z, axis==2 ? fcv(1.0f) : fcv(0.0f)};
++        return root->codegen_grad(cg, dx, dy, dz).dot;
++    };
++    auto* nx = gradN(HX,HY,HZ,0);
++    auto* ny = gradN(HX,HY,HZ,1);
++    auto* nz = gradN(HX,HY,HZ,2);
 +    auto* ninv = b.CreateFDiv(fcv(1.0f), vlen(nx,ny,nz));
 +    nx = b.CreateFMul(nx,ninv); ny = b.CreateFMul(ny,ninv); nz = b.CreateFMul(nz,ninv);
 +    auto* ndl = b.CreateFAdd(b.CreateFMul(nx,fcv(0.388f)),
