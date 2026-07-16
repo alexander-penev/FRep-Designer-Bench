@@ -1,8 +1,8 @@
 diff --git a/core/compiler/codegen.cpp b/core/compiler/codegen.cpp
-index 82bd26a..7215108 100644
+index 82bd26a..33820ea 100644
 --- a/core/compiler/codegen.cpp
 +++ b/core/compiler/codegen.cpp
-@@ -2827,6 +2827,211 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
+@@ -2827,6 +2827,285 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
      return emit_tracer(scene, sdf_fn, normal_fn, shader_fn, mat_fn);
  }
  
@@ -83,14 +83,15 @@ index 82bd26a..7215108 100644
 +        PXv = b.CreateInsertElement(PXv, b.CreateAdd(TX, b.CreateSRem(idx, TW)), l);
 +        PYv = b.CreateInsertElement(PYv, b.CreateAdd(TY, b.CreateSDiv(idx, TW)), l);
 +    }
++    // Match emit_tracer's ray setup EXACTLY: uv_x = (2*px/iw - 1)*aspect,
++    // uv_y = 1 - 2*py/ih (pixel corner, no +0.5), dir = D + uv_x*FOVS*R + uv_y*FOVS*U.
 +    auto* pxf = b.CreateSIToFP(PXv, VT), *pyf = b.CreateSIToFP(PYv, VT);
-+    auto* half = fcv(0.5f);
 +    auto* sx = b.CreateFMul(b.CreateFMul(
-+                 b.CreateFSub(b.CreateFDiv(b.CreateFMul(fcv(2.0f),
-+                    b.CreateFAdd(pxf, half)), iwV), fcv(1.0f)), aspV), fovV);
++                 b.CreateFSub(b.CreateFDiv(b.CreateFMul(fcv(2.0f), pxf), iwV), fcv(1.0f)),
++                 aspV), fovV);
 +    auto* sy = b.CreateFMul(
-+                 b.CreateFSub(fcv(1.0f), b.CreateFDiv(b.CreateFMul(fcv(2.0f),
-+                    b.CreateFAdd(pyf, half)), ihV)), fovV);
++                 b.CreateFSub(fcv(1.0f), b.CreateFDiv(b.CreateFMul(fcv(2.0f), pyf), ihV)),
++                 fovV);
 +    llvm::Value* DXp = b.CreateFAdd(DxV, b.CreateFAdd(b.CreateFMul(sx,RxV), b.CreateFMul(sy,UxV)));
 +    llvm::Value* DYp = b.CreateFAdd(DyV, b.CreateFAdd(b.CreateFMul(sx,RyV), b.CreateFMul(sy,UyV)));
 +    llvm::Value* DZp = b.CreateFAdd(DzV, b.CreateFAdd(b.CreateFMul(sx,RzV), b.CreateFMul(sy,UzV)));
@@ -158,6 +159,20 @@ index 82bd26a..7215108 100644
 +    auto* nz = gradN(HX,HY,HZ,2);
 +    auto* ninv = b.CreateFDiv(fcv(1.0f), vlen(nx,ny,nz));
 +    nx = b.CreateFMul(nx,ninv); ny = b.CreateFMul(ny,ninv); nz = b.CreateFMul(nz,ninv);
++    // Ambient occlusion (matches emit_ambient_occlusion): 5 SDF samples along
++    // the normal, ao = 1 - 0.6*clamp(sum((i*0.15) - sdf(p+n*i*0.15)) * 0.5^(i-1)).
++    llvm::Value* aoTotal = fcv(0.0f); float aow = 1.0f;
++    for (int i = 1; i <= 5; ++i) {
++        float dist = i * 0.15f;
++        auto* hh = sdf(b.CreateFAdd(HX, b.CreateFMul(nx, fcv(dist))),
++                       b.CreateFAdd(HY, b.CreateFMul(ny, fcv(dist))),
++                       b.CreateFAdd(HZ, b.CreateFMul(nz, fcv(dist))));
++        aoTotal = b.CreateFAdd(aoTotal, b.CreateFMul(b.CreateFSub(fcv(dist), hh), fcv(aow)));
++        aow *= 0.5f;
++    }
++    auto* aoCl = frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::minnum,
++                   frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::maxnum, aoTotal, fcv(0.0f)), fcv(1.0f));
++    auto* aoV = b.CreateFSub(fcv(1.0f), b.CreateFMul(aoCl, fcv(0.6f)));
 +    // Stage 3: the scalar path's Blinn-Phong shading with the default material
 +    // (albedo 0.8, roughness 0.5 -> shininess 6, metallic 0) and the scene's
 +    // first point light (fallback {5,10,5}). ambient = albedo*0.08; per light
@@ -168,7 +183,56 @@ index 82bd26a..7215108 100644
 +        x = b.CreateFMul(x,i); y = b.CreateFMul(y,i); z = b.CreateFMul(z,i);
 +    };
 +    llvm::Value* Lx = b.CreateFSub(fcv(5.0f), HX), *Ly = b.CreateFSub(fcv(10.0f), HY), *Lz = b.CreateFSub(fcv(5.0f), HZ);
++    auto* shMaxT = vlen(Lx,Ly,Lz);                 // distance to the light (before normalize)
 +    vnorm3(Lx,Ly,Lz);
++
++    // Stage 4: vector soft shadow (Inigo Quilez, single ray — shadow_samples=1).
++    // March from hit+n*0.01 toward the light: k=min(k, 16*h/t); h<0.002 => full
++    // shadow; stop at the light. A second masked packet march, only hit lanes live.
++    auto* shOx = b.CreateFAdd(HX, b.CreateFMul(nx, fcv(0.01f)));
++    auto* shOy = b.CreateFAdd(HY, b.CreateFMul(ny, fcv(0.01f)));
++    auto* shOz = b.CreateFAdd(HZ, b.CreateFMul(nz, fcv(0.01f)));
++    auto* shPre = b.GetInsertBlock();
++    auto* shLive0 = b.CreateSelect(finalHit, fcv(1.0f), fcv(0.0f));  // emit in shPre (mend)
++    auto* shloop = llvm::BasicBlock::Create(ctx_, "shmarch", fn);
++    auto* shbody = llvm::BasicBlock::Create(ctx_, "shbody", fn);
++    auto* shendB = llvm::BasicBlock::Create(ctx_, "shend", fn);
++    b.CreateBr(shloop);
++    b.SetInsertPoint(shloop);
++    auto* shT = b.CreatePHI(VT, 2, "sht");
++    auto* shK = b.CreatePHI(VT, 2, "shk");
++    auto* shLive = b.CreatePHI(VT, 2, "shlive");
++    auto* shStep = b.CreatePHI(I32, 2, "shs");
++    shT->addIncoming(fcv(0.05f), shPre);
++    shK->addIncoming(fcv(1.0f), shPre);
++    shLive->addIncoming(shLive0, shPre);
++    shStep->addIncoming(b.getInt32(0), shPre);
++    auto* shAny = b.CreateFCmpOGT(
++        b.CreateIntrinsic(llvm::Intrinsic::vector_reduce_fmax, {VT}, {shLive}),
++        llvm::ConstantFP::get(F32, 0.5f));
++    b.CreateCondBr(b.CreateAnd(b.CreateICmpSLT(shStep, b.getInt32(64)), shAny), shbody, shendB);
++    b.SetInsertPoint(shbody);
++    auto* shH = sdf(b.CreateFAdd(shOx, b.CreateFMul(shT, Lx)),
++                    b.CreateFAdd(shOy, b.CreateFMul(shT, Ly)),
++                    b.CreateFAdd(shOz, b.CreateFMul(shT, Lz)));
++    auto* shLiveB = b.CreateFCmpOGT(shLive, fcv(0.5f));
++    auto* fullSh  = b.CreateAnd(b.CreateFCmpOLT(shH, fcv(0.002f)), shLiveB);
++    auto* shKfull = b.CreateSelect(fullSh, fcv(0.0f), shK);
++    auto* ratio   = frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::maxnum,
++                        b.CreateFDiv(b.CreateFMul(fcv(16.0f), shH), shT), fcv(0.0f));
++    auto* shKmin  = frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::minnum, shKfull, ratio);
++    auto* shKnext = b.CreateSelect(shLiveB, shKmin, shK);
++    auto* shTnext = b.CreateFAdd(shT, shH);
++    auto* shLiveNext = b.CreateSelect(b.CreateOr(fullSh, b.CreateFCmpOGE(shTnext, shMaxT)),
++                                      fcv(0.0f), shLive);
++    shT->addIncoming(shTnext, shbody);
++    shK->addIncoming(shKnext, shbody);
++    shLive->addIncoming(shLiveNext, shbody);
++    shStep->addIncoming(b.CreateAdd(shStep, b.getInt32(1)), shbody);
++    b.CreateBr(shloop);
++    b.SetInsertPoint(shendB);
++    auto* shadow = frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::minnum,
++                     frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::maxnum, shK, fcv(0.0f)), fcv(1.0f));
 +    llvm::Value* Vx = b.CreateFSub(OxV, HX), *Vy = b.CreateFSub(OyV, HY), *Vz = b.CreateFSub(OzV, HZ);
 +    vnorm3(Vx,Vy,Vz);
 +    llvm::Value* Hx = b.CreateFAdd(Lx,Vx), *Hy = b.CreateFAdd(Ly,Vy), *Hz = b.CreateFAdd(Lz,Vz);
@@ -179,11 +243,21 @@ index 82bd26a..7215108 100644
 +    auto* spec = b.CreateSelect(b.CreateFCmpOGT(ndotl, fcv(0.0f)),
 +                    frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::pow, ndoth, fcv(6.0f)), fcv(0.0f));
 +    // per-channel: albedo 0.8 (grey); ambient 0.064; diffuse 0.8*ndotl; spec 0.04*spec
-+    auto* lit = b.CreateFAdd(fcv(0.064f),
-+                  b.CreateFAdd(b.CreateFMul(fcv(0.8f), ndotl), b.CreateFMul(fcv(0.04f), spec)));
-+    auto* colR = b.CreateSelect(finalHit, lit, fcv(0.47f));
-+    auto* colG = b.CreateSelect(finalHit, lit, fcv(0.59f));
-+    auto* colB = b.CreateSelect(finalHit, lit, fcv(0.82f));
++    // ambient*ao + (diffuse + spec) * shadow  (matches the scalar assembly).
++    auto* lit = b.CreateFAdd(b.CreateFMul(fcv(0.064f), aoV),
++                  b.CreateFMul(shadow,
++                    b.CreateFAdd(b.CreateFMul(fcv(0.8f), ndotl), b.CreateFMul(fcv(0.04f), spec))));
++    // Sky gradient on miss, matching the scalar path: mix(horizon, top, s),
++    // s = 0.5 + 0.5*ray_dir.y; horizon {0.6,0.7,0.85}, top {0.4,0.5,0.7}.
++    // Final colour clamped to [0,1] (the scalar path does no gamma, just clamp).
++    auto* skyS = b.CreateFAdd(fcv(0.5f), b.CreateFMul(fcv(0.5f), DYp));
++    auto skyC = [&](float hz, float tp){ return b.CreateFAdd(fcv(hz), b.CreateFMul(fcv(tp-hz), skyS)); };
++    auto clamp01 = [&](llvm::Value* v){
++        return frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::minnum,
++                 frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::maxnum, v, fcv(0.0f)), fcv(1.0f)); };
++    auto* colR = clamp01(b.CreateSelect(finalHit, lit, skyC(0.60f, 0.40f)));
++    auto* colG = clamp01(b.CreateSelect(finalHit, lit, skyC(0.70f, 0.50f)));
++    auto* colB = clamp01(b.CreateSelect(finalHit, lit, skyC(0.85f, 0.70f)));
 +
 +    for (unsigned l = 0; l < W; ++l) {
 +        auto* idxRaw = b.CreateAdd(base, b.getInt32((int)l));
