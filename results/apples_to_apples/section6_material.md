@@ -130,6 +130,60 @@ FIG:5_mpr-vs-frep4_geometry.png:The same geometry rendered by mpr (GPU interval 
 
 ---
 
+## Draft — optional block A: GPU_IR confirmed on real NVIDIA hardware
+
+Short addition, folds into the parity discussion (Table 7). Data: measured on the
+RTX 2080 via the CUDA Driver API.
+
+PARA
+The shared-IR pair is confirmed on real hardware, not only in software. GPU_IR
+lowers the same LLVM IR the CPU path JITs to NVPTX and runs it through the CUDA
+driver; on the RTX 2080 its output matches the CPU_IR reference to a mean per-pixel
+difference of 7 x 10^-4 (maximum 0.002-0.003 across scenes, within the parity
+tolerance) — the Table 7 figure, measured on the device rather than on a software
+Vulkan/CPU fallback. It is also the fastest of the four render paths (Table 9,
+about 4.5-6.2 ms per frame at 512x512), and the only one whose render time is
+essentially independent of the scene, since the field is a single call inside a
+compiled sphere-tracer. Reaching this required lowering llvm.pow/exp/log and the
+trigonometric intrinsics to NVPTX (the backend selects only a few transcendentals
+natively); once lowered, the shared-IR guarantee holds end to end from CPU JIT to
+GPU PTX with no separate GPU codegen.
+
+---
+
+## Draft — optional block B: API shape as an architectural advantage (FREP_GRID_HOIST)
+
+Short addition to the grid discussion. Makes concrete that the evaluator's calling
+convention, not just its code, has performance consequences.
+
+SUB:The evaluation interface as a performance lever
+
+The grid figures of Table 8 use a calling convention chosen to match libfive's:
+each point's three coordinates are written before every evaluation, as libfive's
+ArrayEvaluator::set(p,i) requires. FRep Designer's SIMD entry point instead takes
+three separate coordinate arrays, which lets the harness hoist the invariant x
+(constant along a scan row) and y stores out of the innermost loop — an
+optimization libfive's interface cannot express. Enabling it leaves the results
+bit-identical and speeds the grid evaluation by the factors in Table 10, measured
+on the same Broadwell host. The gain is largest on the cheapest scenes, where the
+coordinate broadcast is a larger share of the work, and shrinks as per-point
+arithmetic grows; it should widen again at 16-lane width, where the removed
+broadcast is twice as large. The point is not the speedup itself but its source:
+the shape of the evaluation interface — three arrays rather than one point at a
+time — is a compiler-design choice with a measurable cost, of a piece with the
+paper's framing of the model as a program.
+
+TABLE:10:Grid-evaluation speed-up from hoisting invariant coordinate stores (bit-identical results). AVX2 width 8, Broadwell, grid 193^3.
+Scene|Speed-up
+Sphere (s1)|2.13x
+Smooth blend (s3)|1.36x
+Gyroid (s4)|1.40x
+Gear (c1)|1.14x
+Colonnade (c2)|1.15x
+ENDTABLE
+
+---
+
 ## Notes for integration
 
 - Table/figure numbers (8, and the two figs) are placeholders — renumber into the
