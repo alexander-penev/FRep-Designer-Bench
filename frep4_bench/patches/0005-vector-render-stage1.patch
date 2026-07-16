@@ -1,0 +1,229 @@
+diff --git a/core/compiler/codegen.cpp b/core/compiler/codegen.cpp
+index 82bd26a..1b6cb9a 100644
+--- a/core/compiler/codegen.cpp
++++ b/core/compiler/codegen.cpp
+@@ -2827,6 +2827,182 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
+     return emit_tracer(scene, sdf_fn, normal_fn, shader_fn, mat_fn);
+ }
+ 
++// ── Approach B, Stage 1: CPU vector (W-wide) render_tile emitted in IR ────────
++// Mirrors the verified host packet tracer (core/render/cpu_trace.hpp): W rays
++// per packet, masked march, central-difference normals, single-light Lambert.
++// Behind FREP4_VEC_RENDER; the scalar path is untouched.
++llvm::Function* SceneCodegen::emit_render_tile_vec(const SceneGraph& scene,
++                                                   SceneSdfMode mode,
++                                                   unsigned W) {
++    std::vector<FRepNode::Ptr> geoms;
++    for (auto& [id, obj] : scene.objects())
++        if (obj.visible) geoms.push_back(obj.geometry);
++    if (geoms.empty()) throw std::runtime_error("emit_render_tile_vec: empty scene");
++    auto root = union_all(geoms);
++    (void)mode;
++
++    auto* F32 = llvm::Type::getFloatTy(ctx_);
++    auto* I32 = llvm::Type::getInt32Ty(ctx_);
++    auto* VT  = llvm::VectorType::get(F32, W, false);
++    auto* VI  = llvm::VectorType::get(I32, W, false);
++    auto* PF  = llvm::PointerType::getUnqual(ctx_);
++
++    std::vector<llvm::Type*> at = { PF, I32,I32,I32,I32, I32,I32,
++                                    F32,F32,F32, F32,F32,F32, F32,F32,F32, F32,F32,F32, F32 };
++    auto* fty = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_), at, false);
++    auto* fn  = llvm::Function::Create(fty, llvm::Function::ExternalLinkage,
++                                       "render_tile", mod_.get());
++    fn->addFnAttr(llvm::Attribute::NoUnwind);
++
++    auto A = fn->arg_begin();
++    llvm::Value* OUT = &*A++;
++    llvm::Value* TX = &*A++, *TY = &*A++, *TW = &*A++, *TH = &*A++;
++    llvm::Value* IW = &*A++, *IH = &*A++;
++    llvm::Value* Ox = &*A++, *Oy = &*A++, *Oz = &*A++;
++    llvm::Value* Dx = &*A++, *Dy = &*A++, *Dz = &*A++;
++    llvm::Value* Rx = &*A++, *Ry = &*A++, *Rz = &*A++;
++    llvm::Value* Ux = &*A++, *Uy = &*A++, *Uz = &*A++;
++    llvm::Value* FOV = &*A++;
++
++    auto* entry = llvm::BasicBlock::Create(ctx_, "entry", fn);
++    llvm::IRBuilder<> b(entry);
++    auto splat = [&](llvm::Value* s){ return b.CreateVectorSplat(W, s); };
++    auto fcv   = [&](float v){ return b.CreateVectorSplat(W, llvm::ConstantFP::get(F32, v)); };
++    auto sdf = [&](llvm::Value* X, llvm::Value* Y, llvm::Value* Z) -> llvm::Value* {
++        CgCtx cg{ctx_, *mod_, b}; cg.width = W;
++        return root->codegen(cg, X, Y, Z);
++    };
++    auto vlen = [&](llvm::Value* x, llvm::Value* y, llvm::Value* z){
++        auto* s = b.CreateFAdd(b.CreateFMul(x,x),
++                    b.CreateFAdd(b.CreateFMul(y,y), b.CreateFMul(z,z)));
++        return frep::llvm_compat::unary_intrinsic(b, llvm::Intrinsic::sqrt, s);
++    };
++
++    auto* iwf = b.CreateSIToFP(IW, F32), *ihf = b.CreateSIToFP(IH, F32);
++    auto* aspV = splat(b.CreateFDiv(iwf, ihf)), *fovV = splat(FOV);
++    auto* iwV = splat(iwf), *ihV = splat(ihf);
++    auto* OxV = splat(Ox), *OyV = splat(Oy), *OzV = splat(Oz);
++    auto* DxV = splat(Dx), *DyV = splat(Dy), *DzV = splat(Dz);
++    auto* RxV = splat(Rx), *RyV = splat(Ry), *RzV = splat(Rz);
++    auto* UxV = splat(Ux), *UyV = splat(Uy), *UzV = splat(Uz);
++    auto* total = b.CreateMul(TW, TH);
++
++    auto* pre = b.GetInsertBlock();
++    auto* ploop = llvm::BasicBlock::Create(ctx_, "packet", fn);
++    auto* pdone = llvm::BasicBlock::Create(ctx_, "done", fn);
++    b.CreateBr(ploop);
++    b.SetInsertPoint(ploop);
++    auto* base = b.CreatePHI(I32, 2, "base");
++    base->addIncoming(b.getInt32(0), pre);
++
++    llvm::Value* PXv = llvm::UndefValue::get(VI);
++    llvm::Value* PYv = llvm::UndefValue::get(VI);
++    for (unsigned l = 0; l < W; ++l) {
++        auto* idxRaw = b.CreateAdd(base, b.getInt32((int)l));
++        auto* over = b.CreateICmpSGE(idxRaw, total);
++        auto* idx  = b.CreateSelect(over, b.CreateSub(total, b.getInt32(1)), idxRaw);
++        PXv = b.CreateInsertElement(PXv, b.CreateAdd(TX, b.CreateSRem(idx, TW)), l);
++        PYv = b.CreateInsertElement(PYv, b.CreateAdd(TY, b.CreateSDiv(idx, TW)), l);
++    }
++    auto* pxf = b.CreateSIToFP(PXv, VT), *pyf = b.CreateSIToFP(PYv, VT);
++    auto* half = fcv(0.5f);
++    auto* sx = b.CreateFMul(b.CreateFMul(
++                 b.CreateFSub(b.CreateFDiv(b.CreateFMul(fcv(2.0f),
++                    b.CreateFAdd(pxf, half)), iwV), fcv(1.0f)), aspV), fovV);
++    auto* sy = b.CreateFMul(
++                 b.CreateFSub(fcv(1.0f), b.CreateFDiv(b.CreateFMul(fcv(2.0f),
++                    b.CreateFAdd(pyf, half)), ihV)), fovV);
++    llvm::Value* DXp = b.CreateFAdd(DxV, b.CreateFAdd(b.CreateFMul(sx,RxV), b.CreateFMul(sy,UxV)));
++    llvm::Value* DYp = b.CreateFAdd(DyV, b.CreateFAdd(b.CreateFMul(sx,RyV), b.CreateFMul(sy,UyV)));
++    llvm::Value* DZp = b.CreateFAdd(DzV, b.CreateFAdd(b.CreateFMul(sx,RzV), b.CreateFMul(sy,UzV)));
++    auto* inv = b.CreateFDiv(fcv(1.0f), vlen(DXp,DYp,DZp));
++    DXp = b.CreateFMul(DXp,inv); DYp = b.CreateFMul(DYp,inv); DZp = b.CreateFMul(DZp,inv);
++
++    const float EPS = cfg_.epsilon, TMIN = 1e-3f, TMAX = 12.0f, SAFE = 0.85f;
++    const int MAXS = cfg_.max_steps;
++    auto* preM = b.GetInsertBlock();
++    auto* mloop = llvm::BasicBlock::Create(ctx_, "march", fn);
++    auto* mbody = llvm::BasicBlock::Create(ctx_, "mbody", fn);
++    auto* mend  = llvm::BasicBlock::Create(ctx_, "mend", fn);
++    b.CreateBr(mloop);
++    b.SetInsertPoint(mloop);
++    auto* Tphi = b.CreatePHI(VT, 2, "t");
++    auto* live = b.CreatePHI(VT, 2, "live");
++    auto* step = b.CreatePHI(I32, 2, "s");
++    Tphi->addIncoming(fcv(TMIN), preM);
++    live->addIncoming(fcv(1.0f), preM);
++    step->addIncoming(b.getInt32(0), preM);
++    // Early-exit: stop the packet as soon as every lane has hit or escaped
++    // (reduce-max of the live mask). Without this the packet runs the full
++    // step budget even after all rays converge — the dominant Stage-1 cost.
++    auto* anyLive = b.CreateFCmpOGT(
++        b.CreateIntrinsic(llvm::Intrinsic::vector_reduce_fmax, {VT}, {live}),
++        llvm::ConstantFP::get(F32, 0.5f));
++    auto* go = b.CreateAnd(b.CreateICmpSLT(step, b.getInt32(MAXS)), anyLive);
++    b.CreateCondBr(go, mbody, mend);
++
++    b.SetInsertPoint(mbody);
++    auto* fval = sdf(b.CreateFAdd(OxV, b.CreateFMul(Tphi,DXp)),
++                     b.CreateFAdd(OyV, b.CreateFMul(Tphi,DYp)),
++                     b.CreateFAdd(OzV, b.CreateFMul(Tphi,DZp)));
++    auto* newHit = b.CreateAnd(b.CreateFCmpOLT(fval, fcv(EPS)),
++                               b.CreateFCmpOGT(live, fcv(0.5f)));
++    auto* liveNext = b.CreateSelect(newHit, fcv(0.0f), live);
++    auto* stepAmt = b.CreateSelect(b.CreateFCmpOGT(liveNext, fcv(0.5f)),
++                        b.CreateFMul(fcv(SAFE), fval), fcv(0.0f));
++    auto* Tnext = b.CreateFAdd(Tphi, stepAmt);
++    liveNext = b.CreateSelect(b.CreateFCmpOGE(Tnext, fcv(TMAX)), fcv(0.0f), liveNext);
++    Tphi->addIncoming(Tnext, mbody);
++    live->addIncoming(liveNext, mbody);
++    step->addIncoming(b.CreateAdd(step, b.getInt32(1)), mbody);
++    b.CreateBr(mloop);
++
++    b.SetInsertPoint(mend);
++    auto* finalHit = b.CreateAnd(b.CreateFCmpOLE(live, fcv(0.5f)),
++                                 b.CreateFCmpOLT(Tphi, fcv(TMAX)));
++    auto* HX = b.CreateFAdd(OxV, b.CreateFMul(Tphi,DXp));
++    auto* HY = b.CreateFAdd(OyV, b.CreateFMul(Tphi,DYp));
++    auto* HZ = b.CreateFAdd(OzV, b.CreateFMul(Tphi,DZp));
++    auto* h = fcv(1e-3f);
++    auto* nx = b.CreateFSub(sdf(b.CreateFAdd(HX,h),HY,HZ), sdf(b.CreateFSub(HX,h),HY,HZ));
++    auto* ny = b.CreateFSub(sdf(HX,b.CreateFAdd(HY,h),HZ), sdf(HX,b.CreateFSub(HY,h),HZ));
++    auto* nz = b.CreateFSub(sdf(HX,HY,b.CreateFAdd(HZ,h)), sdf(HX,HY,b.CreateFSub(HZ,h)));
++    auto* ninv = b.CreateFDiv(fcv(1.0f), vlen(nx,ny,nz));
++    nx = b.CreateFMul(nx,ninv); ny = b.CreateFMul(ny,ninv); nz = b.CreateFMul(nz,ninv);
++    auto* ndl = b.CreateFAdd(b.CreateFMul(nx,fcv(0.388f)),
++                  b.CreateFAdd(b.CreateFMul(ny,fcv(0.680f)), b.CreateFMul(nz,fcv(0.622f))));
++    auto* diff = frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::maxnum, ndl, fcv(0.0f));
++    auto* shade = b.CreateFAdd(fcv(0.15f), b.CreateFMul(fcv(0.85f), diff));
++    auto* colR = b.CreateSelect(finalHit, b.CreateFMul(fcv(0.82f), shade), fcv(0.47f));
++    auto* colG = b.CreateSelect(finalHit, b.CreateFMul(fcv(0.82f), shade), fcv(0.59f));
++    auto* colB = b.CreateSelect(finalHit, b.CreateFMul(fcv(0.80f), shade), fcv(0.82f));
++
++    for (unsigned l = 0; l < W; ++l) {
++        auto* idxRaw = b.CreateAdd(base, b.getInt32((int)l));
++        auto* inR = b.CreateICmpSLT(idxRaw, total);
++        auto* pix = b.CreateAdd(b.CreateMul(b.CreateExtractElement(PYv,l), IW),
++                                b.CreateExtractElement(PXv,l));
++        auto* off = b.CreateMul(pix, b.getInt32(4));
++        auto st = [&](llvm::Value* vv, int c){
++            auto* gep = b.CreateGEP(F32, OUT, b.CreateAdd(off, b.getInt32(c)));
++            auto* cur = b.CreateLoad(F32, gep);
++            b.CreateStore(b.CreateSelect(inR, b.CreateExtractElement(vv,l), cur), gep);
++        };
++        st(colR,0); st(colG,1); st(colB,2);
++        auto* gep = b.CreateGEP(F32, OUT, b.CreateAdd(off, b.getInt32(3)));
++        auto* cur = b.CreateLoad(F32, gep);
++        b.CreateStore(b.CreateSelect(inR, llvm::ConstantFP::get(F32,1.0f), cur), gep);
++    }
++    auto* nbase = b.CreateAdd(base, b.getInt32((int)W));
++    base->addIncoming(nbase, b.GetInsertBlock());
++    b.CreateCondBr(b.CreateICmpSLT(nbase, total), ploop, pdone);
++
++    b.SetInsertPoint(pdone);
++    b.CreateRetVoid();
++    verify_fn(fn);
++    return fn;
++}
++
+ // ─────────────────────────────────────────────────────────────────────────────
+ // emit_gpu_kernel — per-pixel CUDA/NVPTX kernel
+ //
+diff --git a/core/compiler/codegen.hpp b/core/compiler/codegen.hpp
+index 0e7310c..23f9f9c 100644
+--- a/core/compiler/codegen.hpp
++++ b/core/compiler/codegen.hpp
+@@ -223,6 +223,13 @@ public:
+     llvm::Function* emit_render_tile(const SceneGraph& scene,
+                                      SceneSdfMode mode = SceneSdfMode::Inlined);
+ 
++    // Approach B — CPU vector (W-wide) render_tile emitted in IR. Same signature
++    // as emit_render_tile; selected behind FREP4_VEC_RENDER. Stage 1: masked
++    // march + central-difference normals + single-light Lambert.
++    llvm::Function* emit_render_tile_vec(const SceneGraph& scene,
++                                         SceneSdfMode mode = SceneSdfMode::Inlined,
++                                         unsigned W = 8);
++
+     // Emit a per-pixel GPU compute kernel ("render_tile") for the CUDA/NVPTX
+     // path. It reads the pixel from the thread/block id (NVPTX sreg
+     // intrinsics), maps thread → one pixel, and reuses the full raymarch by
+diff --git a/core/exec/cpu_executor.hpp b/core/exec/cpu_executor.hpp
+index a1db7f7..f952560 100644
+--- a/core/exec/cpu_executor.hpp
++++ b/core/exec/cpu_executor.hpp
+@@ -22,6 +22,7 @@
+ #include <string>
+ #include <thread>
+ #include <vector>
++#include <cstdlib>
+ 
+ namespace frep::exec {
+ 
+@@ -60,7 +61,10 @@ public:
+             TracerConfig cfg = cfg_;
+             SceneCodegen cg(*ctx, cfg);
+             try {
+-                cg.emit_render_tile(scene, mode_);
++                if (std::getenv("FREP4_VEC_RENDER"))
++                    cg.emit_render_tile_vec(scene, mode_, 8);   // Approach B (CPU packet)
++                else
++                    cg.emit_render_tile(scene, mode_);
+             } catch (const std::exception& e) {
+                 r.error = std::string("codegen: ") + e.what();
+                 return r;
