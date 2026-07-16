@@ -102,23 +102,41 @@ int main(int argc, char** argv) {
         std::vector<float> X(N), Y(N), Z(N);
         auto coord = [&](long i){ return -1.6f + 3.2f * i / (N - 1); };
         if (simd) {
-            // Backend name reflects the width actually used (8 on AVX2, 16 on AVX-512).
-            static std::string simd_backend = "cpu_ir-simd" + std::to_string(simd->width);
+            // FREP_GRID_HOIST controls the harness loop, and the comparison
+            // depends on it, so the backend name records both width and mode:
+            //   =0 (default) — set x,y,z per W-group, mirroring libfive's
+            //     ArrayEvaluator::set(p,i) API (writes all three coords per
+            //     point, no way to hoist the invariant ones). API-fair.
+            //   =1 — hoist the invariant x (per i) and y (per j) stores out of
+            //     the inner loop. frep4's SIMD entry point takes three separate
+            //     arrays, so it *can*; libfive's set() cannot. Bit-identical,
+            //     faster — a real architectural advantage, not a like-for-like
+            //     harness. Interacts with width: at 16 lanes the per-group x/y
+            //     broadcast it removes is larger, so the gain should grow.
+            const bool hoist = [] {
+                const char* e = std::getenv("FREP_GRID_HOIST");
+                return e && e[0] == '1';
+            }();
+            static std::string simd_backend =
+                "cpu_ir-simd" + std::to_string(simd->width) + (hoist ? "-hoist" : "");
             backend = simd_backend.c_str();
             auto sca1 = jit::compile_scene_sdf(s);
             if (!sca1) { std::fprintf(stderr, "%s: %s\n", argv[a], sca1.error().c_str()); return 2; }
             static jit::CompiledSdf tailk = std::move(*sca1);
             auto fn = simd->fn; unsigned W = simd->width; auto sfn = tailk.fn;
-            body = [&, fn, sfn, W] {
-                float O[16]; float acc = 0;
+            body = [&, fn, sfn, W, hoist] {
+                alignas(64) float O[16], xs[16], ys[16];
+                float acc = 0;
                 std::vector<float> zx(N);
                 for (long k = 0; k < N; ++k) zx[k] = coord(k);
                 for (long i = 0; i < N; ++i) { float xi = coord(i);
+                    if (hoist) for (unsigned l = 0; l < W; ++l) xs[l] = xi;
                 for (long j = 0; j < N; ++j) { float yj = coord(j);
+                    if (hoist) for (unsigned l = 0; l < W; ++l) ys[l] = yj;
                     long k = 0;
                     for (; k + (long)W <= N; k += W) {
-                        float xs[16], ys[16];
-                        for (unsigned l = 0; l < W; ++l) { xs[l] = xi; ys[l] = yj; }
+                        if (!hoist)
+                            for (unsigned l = 0; l < W; ++l) { xs[l] = xi; ys[l] = yj; }
                         fn(xs, ys, &zx[k], O);
                         for (unsigned l = 0; l < W; ++l) acc += O[l];
                     }
