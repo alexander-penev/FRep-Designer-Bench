@@ -1,5 +1,5 @@
 diff --git a/core/compiler/codegen.cpp b/core/compiler/codegen.cpp
-index 82bd26a..a6e3099 100644
+index 82bd26a..ba3e3ea 100644
 --- a/core/compiler/codegen.cpp
 +++ b/core/compiler/codegen.cpp
 @@ -2827,6 +2827,375 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
@@ -283,7 +283,7 @@ index 82bd26a..a6e3099 100644
 +                        b.CreateFDiv(b.CreateFMul(fcv(16.0f), shH), shT), fcv(0.0f));
 +    auto* shKmin  = frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::minnum, shKfull, ratio);
 +    auto* shKnext = b.CreateSelect(shLiveB, shKmin, shK);
-+    auto* shTnext = b.CreateFAdd(shT, shH);
++    auto* shTnext = b.CreateFAdd(shT, b.CreateFMul(fcv(SAFE), shH));  // t += h*safety, like the scalar
 +    auto* shLiveNext = b.CreateSelect(b.CreateOr(fullSh, b.CreateFCmpOGE(shTnext, shMaxT)),
 +                                      fcv(0.0f), shLive);
 +    shT->addIncoming(shTnext, shbody);
