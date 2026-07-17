@@ -1,8 +1,8 @@
 diff --git a/core/compiler/codegen.cpp b/core/compiler/codegen.cpp
-index 82bd26a..6b927b2 100644
+index 82bd26a..a6e3099 100644
 --- a/core/compiler/codegen.cpp
 +++ b/core/compiler/codegen.cpp
-@@ -2827,6 +2827,321 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
+@@ -2827,6 +2827,375 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
      return emit_tracer(scene, sdf_fn, normal_fn, shader_fn, mat_fn);
  }
  
@@ -19,6 +19,35 @@ index 82bd26a..6b927b2 100644
 +    if (geoms.empty()) throw std::runtime_error("emit_render_tile_vec: empty scene");
 +    auto root = union_all(geoms);
 +    (void)mode;
++
++    // Scene AABB (compile-time), mirroring emit_tracer, for the ray-box clip: the
++    // march must start at the box entry, not t=1e-3, or the extra empty-space
++    // steps accumulate float rounding and shift the hit point on sensitive fields
++    // (the gyroid), which then shifts the shadow — the concave-scene penumbra gap.
++    bool scene_bounded = false; FRepNode::AABB scene_box{};
++    for (auto& g : geoms) {
++        FRepNode::AABB bx = g->aabb();
++        bool ok = std::isfinite(bx.min_x)&&std::isfinite(bx.min_y)&&std::isfinite(bx.min_z)&&
++                  std::isfinite(bx.max_x)&&std::isfinite(bx.max_y)&&std::isfinite(bx.max_z);
++        if (!ok) { scene_bounded = false; break; }
++        if (!scene_bounded) { scene_box = bx; scene_bounded = true; }
++        else {
++            scene_box.min_x = std::min(scene_box.min_x, bx.min_x);
++            scene_box.min_y = std::min(scene_box.min_y, bx.min_y);
++            scene_box.min_z = std::min(scene_box.min_z, bx.min_z);
++            scene_box.max_x = std::max(scene_box.max_x, bx.max_x);
++            scene_box.max_y = std::max(scene_box.max_y, bx.max_y);
++            scene_box.max_z = std::max(scene_box.max_z, bx.max_z);
++        }
++    }
++    if (scene_bounded) {
++        float m = 0.05f * std::max({scene_box.max_x - scene_box.min_x,
++                                    scene_box.max_y - scene_box.min_y,
++                                    scene_box.max_z - scene_box.min_z, 0.1f});
++        scene_box.min_x -= m; scene_box.min_y -= m; scene_box.min_z -= m;
++        scene_box.max_x += m; scene_box.max_y += m; scene_box.max_z += m;
++    }
++    const bool use_clip = scene_bounded && cfg_.bbox_clip;
 +
 +    auto* F32 = llvm::Type::getFloatTy(ctx_);
 +    auto* I32 = llvm::Type::getInt32Ty(ctx_);
@@ -104,9 +133,34 @@ index 82bd26a..6b927b2 100644
 +    // just enough for the pow(ndoth,6) specular to differ visibly.
 +    const bool multiple = (root->kind == NodeKind::Union) || (root->kind == NodeKind::Scene);
 +    const bool needs_safety = multiple || node_requires_safety_step(*root);
-+    const float EPS = cfg_.epsilon, TMIN = 1e-3f, TMAX = 12.0f;
++    const float EPS = cfg_.epsilon;
 +    const float SAFE = needs_safety ? cfg_.safety_factor : 1.0f;
 +    const int MAXS = cfg_.max_steps;
++
++    // Ray-box clip (slab method): t starts at the box entry, stops at the box
++    // exit — same as emit_tracer, so the step sequence (and thus the hit point)
++    // coincides. A missed ray gets tExit < tEnter and the march terminates fast.
++    llvm::Value* tEnter = fcv(1e-3f);
++    llvm::Value* tExit  = fcv(cfg_.max_dist);
++    if (use_clip) {
++        auto vmn = [&](llvm::Value* a, llvm::Value* c){ return frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::minnum, a, c); };
++        auto vmx = [&](llvm::Value* a, llvm::Value* c){ return frep::llvm_compat::binary_intrinsic(b, llvm::Intrinsic::maxnum, a, c); };
++        auto slab = [&](llvm::Value* o, llvm::Value* dn, float lo, float hi,
++                        llvm::Value*& tmn, llvm::Value*& tmx){
++            auto* invd = b.CreateFDiv(fcv(1.0f), dn);
++            auto* t1 = b.CreateFMul(b.CreateFSub(fcv(lo), o), invd);
++            auto* t2 = b.CreateFMul(b.CreateFSub(fcv(hi), o), invd);
++            auto* mn = vmn(t1,t2), *mx = vmx(t1,t2);
++            tmn = tmn ? vmx(tmn,mn) : mn;
++            tmx = tmx ? vmn(tmx,mx) : mx;
++        };
++        llvm::Value *tmn=nullptr, *tmx=nullptr;
++        slab(OxV, DXp, scene_box.min_x, scene_box.max_x, tmn, tmx);
++        slab(OyV, DYp, scene_box.min_y, scene_box.max_y, tmn, tmx);
++        slab(OzV, DZp, scene_box.min_z, scene_box.max_z, tmn, tmx);
++        tEnter = vmx(tEnter, tmn);
++        tExit  = vmn(tExit, tmx);
++    }
 +    auto* preM = b.GetInsertBlock();
 +    auto* mloop = llvm::BasicBlock::Create(ctx_, "march", fn);
 +    auto* mbody = llvm::BasicBlock::Create(ctx_, "mbody", fn);
@@ -116,7 +170,7 @@ index 82bd26a..6b927b2 100644
 +    auto* Tphi = b.CreatePHI(VT, 2, "t");
 +    auto* live = b.CreatePHI(VT, 2, "live");
 +    auto* step = b.CreatePHI(I32, 2, "s");
-+    Tphi->addIncoming(fcv(TMIN), preM);
++    Tphi->addIncoming(tEnter, preM);
 +    live->addIncoming(fcv(1.0f), preM);
 +    step->addIncoming(b.getInt32(0), preM);
 +    // Early-exit: stop the packet as soon as every lane has hit or escaped
@@ -138,7 +192,7 @@ index 82bd26a..6b927b2 100644
 +    auto* stepAmt = b.CreateSelect(b.CreateFCmpOGT(liveNext, fcv(0.5f)),
 +                        b.CreateFMul(fcv(SAFE), fval), fcv(0.0f));
 +    auto* Tnext = b.CreateFAdd(Tphi, stepAmt);
-+    liveNext = b.CreateSelect(b.CreateFCmpOGE(Tnext, fcv(TMAX)), fcv(0.0f), liveNext);
++    liveNext = b.CreateSelect(b.CreateFCmpOGE(Tnext, tExit), fcv(0.0f), liveNext);
 +    Tphi->addIncoming(Tnext, mbody);
 +    live->addIncoming(liveNext, mbody);
 +    step->addIncoming(b.CreateAdd(step, b.getInt32(1)), mbody);
@@ -146,7 +200,7 @@ index 82bd26a..6b927b2 100644
 +
 +    b.SetInsertPoint(mend);
 +    auto* finalHit = b.CreateAnd(b.CreateFCmpOLE(live, fcv(0.5f)),
-+                                 b.CreateFCmpOLT(Tphi, fcv(TMAX)));
++                                 b.CreateFCmpOLT(Tphi, tExit));
 +    auto* HX = b.CreateFAdd(OxV, b.CreateFMul(Tphi,DXp));
 +    auto* HY = b.CreateFAdd(OyV, b.CreateFMul(Tphi,DYp));
 +    auto* HZ = b.CreateFAdd(OzV, b.CreateFMul(Tphi,DZp));
@@ -324,53 +378,3 @@ index 82bd26a..6b927b2 100644
  // ─────────────────────────────────────────────────────────────────────────────
  // emit_gpu_kernel — per-pixel CUDA/NVPTX kernel
  //
-diff --git a/core/compiler/codegen.hpp b/core/compiler/codegen.hpp
-index 0e7310c..23f9f9c 100644
---- a/core/compiler/codegen.hpp
-+++ b/core/compiler/codegen.hpp
-@@ -223,6 +223,13 @@ public:
-     llvm::Function* emit_render_tile(const SceneGraph& scene,
-                                      SceneSdfMode mode = SceneSdfMode::Inlined);
- 
-+    // Approach B — CPU vector (W-wide) render_tile emitted in IR. Same signature
-+    // as emit_render_tile; selected behind FREP4_VEC_RENDER. Stage 1: masked
-+    // march + central-difference normals + single-light Lambert.
-+    llvm::Function* emit_render_tile_vec(const SceneGraph& scene,
-+                                         SceneSdfMode mode = SceneSdfMode::Inlined,
-+                                         unsigned W = 8);
-+
-     // Emit a per-pixel GPU compute kernel ("render_tile") for the CUDA/NVPTX
-     // path. It reads the pixel from the thread/block id (NVPTX sreg
-     // intrinsics), maps thread → one pixel, and reuses the full raymarch by
-diff --git a/core/exec/cpu_executor.hpp b/core/exec/cpu_executor.hpp
-index a1db7f7..0a5e05b 100644
---- a/core/exec/cpu_executor.hpp
-+++ b/core/exec/cpu_executor.hpp
-@@ -22,6 +22,7 @@
- #include <string>
- #include <thread>
- #include <vector>
-+#include <cstdlib>
- 
- namespace frep::exec {
- 
-@@ -60,7 +61,10 @@ public:
-             TracerConfig cfg = cfg_;
-             SceneCodegen cg(*ctx, cfg);
-             try {
--                cg.emit_render_tile(scene, mode_);
-+                if (std::getenv("FREP4_VEC_RENDER"))
-+                    cg.emit_render_tile_vec(scene, mode_, 8);   // Approach B (CPU packet)
-+                else
-+                    cg.emit_render_tile(scene, mode_);
-             } catch (const std::exception& e) {
-                 r.error = std::string("codegen: ") + e.what();
-                 return r;
-@@ -86,6 +90,7 @@ public:
-         RenderParams rp; rp.width = W; rp.height = H;
-         rp.region_x0 = tile.x0; rp.region_y0 = tile.y0;
-         rp.region_x1 = tile.x1; rp.region_y1 = tile.y1;
-+        if (const char* s = std::getenv("FREP4_SSAA")) rp.ssaa = std::max(1, atoi(s));
-         r.threads_used = (int)std::thread::hardware_concurrency();
-         auto t_r = clk::now();
-         TileScheduler::render(*fn, full.data(), scene.camera(), rp);
