@@ -1,8 +1,8 @@
 diff --git a/core/compiler/codegen.cpp b/core/compiler/codegen.cpp
-index 82bd26a..5a109af 100644
+index 82bd26a..b351978 100644
 --- a/core/compiler/codegen.cpp
 +++ b/core/compiler/codegen.cpp
-@@ -2827,6 +2827,289 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
+@@ -2827,6 +2827,296 @@ llvm::Function* SceneCodegen::emit_render_tile(const SceneGraph& scene,
      return emit_tracer(scene, sdf_fn, normal_fn, shader_fn, mat_fn);
  }
  
@@ -98,7 +98,14 @@ index 82bd26a..5a109af 100644
 +    auto* inv = b.CreateFDiv(fcv(1.0f), vlen(DXp,DYp,DZp));
 +    DXp = b.CreateFMul(DXp,inv); DYp = b.CreateFMul(DYp,inv); DZp = b.CreateFMul(DZp,inv);
 +
-+    const float EPS = cfg_.epsilon, TMIN = 1e-3f, TMAX = 12.0f, SAFE = 0.85f;
++    // Match emit_render_tile's step: a true single-primitive SDF marches with a
++    // full step (safety 1.0), CSG/plugin/mesh/custom trees use the reduced
++    // safety_factor. Using 0.85 everywhere shifted the hit point on the sphere
++    // just enough for the pow(ndoth,6) specular to differ visibly.
++    const bool multiple = (root->kind == NodeKind::Union) || (root->kind == NodeKind::Scene);
++    const bool needs_safety = multiple || node_requires_safety_step(*root);
++    const float EPS = cfg_.epsilon, TMIN = 1e-3f, TMAX = 12.0f;
++    const float SAFE = needs_safety ? cfg_.safety_factor : 1.0f;
 +    const int MAXS = cfg_.max_steps;
 +    auto* preM = b.GetInsertBlock();
 +    auto* mloop = llvm::BasicBlock::Create(ctx_, "march", fn);
