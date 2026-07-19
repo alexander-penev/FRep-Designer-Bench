@@ -29,11 +29,14 @@ else()
 endif()
 set(FREP_BUILD_OPENCL OFF CACHE BOOL "" FORCE)
 add_subdirectory(${FREP4_ROOT} ${CMAKE_BINARY_DIR}/frep4 EXCLUDE_FROM_ALL)
-foreach(t gen_scenes bench_grid)
+foreach(t gen_scenes bench_grid tmpl_check)
   add_executable(frep4_${t} ${t}.cpp)
   target_include_directories(frep4_${t} PRIVATE ${FREP4_ROOT})
   target_link_libraries(frep4_${t} PRIVATE frep_core)
   set_property(TARGET frep4_${t} PROPERTY CXX_STANDARD 26)
+  # frep_core is built -fno-rtti (LLVM); match it so header-only node types
+  # (InstanceNode) don't emit typeinfo referencing the suppressed FRepNode RTTI.
+  target_compile_options(frep4_${t} PRIVATE -fno-rtti)
 endforeach()
 
 if(FREP4_BENCH_RENDER)

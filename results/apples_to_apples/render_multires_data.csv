@@ -1,0 +1,49 @@
+# Multi-resolution render re-measurement, 7 cross-system scenes, current build.
+# Machine: dual-socket Xeon E5-2690 v4 (Broadwell) + RTX 2080. CPU render is
+# internally multi-threaded/tiled; GPU_GLSL on the discrete GPU. Single-shot per
+# cell (compile is one-off; render is the bench's steady-state median).
+# Purpose: shows the OLD Tables 5-6 (docs/BENCHMARKS.md campaign) render times are
+# ~10-30x slower than the current build — a different, much slower configuration.
+# Columns: backend,scene,res,compile_ms,render_ms
+cpu_ir,s1_sphere,400,54.0,6.919
+cpu_ir,s2_csg,400,65.1,5.372
+cpu_ir,s3_blend,400,72.3,7.568
+cpu_ir,s4_gyroid,400,74.0,10.651
+cpu_ir,s5_twist,400,57.9,7.001
+cpu_ir,c1_gear,400,316.4,18.007
+cpu_ir,c2_colonnade,400,240.5,35.751
+cpu_ir,s1_sphere,800,42.3,21.283
+cpu_ir,s2_csg,800,56.3,10.478
+cpu_ir,s3_blend,800,57.5,18.850
+cpu_ir,s4_gyroid,800,56.1,23.903
+cpu_ir,s5_twist,800,63.9,18.915
+cpu_ir,c1_gear,800,307.6,35.552
+cpu_ir,c2_colonnade,800,191.9,77.643
+cpu_ir,s1_sphere,1280,53.6,51.749
+cpu_ir,s2_csg,1280,70.7,25.322
+cpu_ir,s3_blend,1280,55.7,37.349
+cpu_ir,s4_gyroid,1280,70.0,49.228
+cpu_ir,s5_twist,1280,54.7,39.299
+cpu_ir,c1_gear,1280,313.6,77.333
+cpu_ir,c2_colonnade,1280,179.6,184.267
+gpu_glsl,s1_sphere,400,297.6,2.608
+gpu_glsl,s2_csg,400,340.3,4.937
+gpu_glsl,s3_blend,400,319.3,7.157
+gpu_glsl,s4_gyroid,400,341.1,5.097
+gpu_glsl,s5_twist,400,324.0,5.003
+gpu_glsl,c1_gear,400,328.5,5.309
+gpu_glsl,c2_colonnade,400,306.9,5.124
+gpu_glsl,s1_sphere,800,326.6,15.919
+gpu_glsl,s2_csg,800,334.8,12.704
+gpu_glsl,s3_blend,800,316.3,10.855
+gpu_glsl,s4_gyroid,800,337.0,15.155
+gpu_glsl,s5_twist,800,310.6,15.089
+gpu_glsl,c1_gear,800,380.6,11.133
+gpu_glsl,c2_colonnade,800,398.3,16.175
+gpu_glsl,s1_sphere,1280,326.7,50.304
+gpu_glsl,s2_csg,1280,332.7,45.951
+gpu_glsl,s3_blend,1280,386.0,68.574
+gpu_glsl,s4_gyroid,1280,364.8,47.850
+gpu_glsl,s5_twist,1280,362.0,48.319
+gpu_glsl,c1_gear,1280,345.2,37.549
+gpu_glsl,c2_colonnade,1280,349.9,39.217
