@@ -1,0 +1,11 @@
+# GPU_RTX multi-BLAS vs CPU_IR raymarch on a grid of N separable spheres (union).
+# frep_rtx_bench, RTX 2080, 256x256, hot-loop throughput (setup excluded).
+# The RTX advantage grows with instance count: the TLAS broad phase culls the
+# instances a ray misses, while the CPU raymarch re-walks the whole scene.
+N,cpu_ir_mpix_s,gpu_rtx_mpix_s,rtx_speedup
+1,23.9,194.5,8.1
+4,16.6,134.4,8.1
+16,10.6,65.3,6.2
+64,4.1,38.7,9.4
+256,1.2,22.0,18.0
+# Energy (RTX NVML, Mpix/kWh, from --energy run): N=4 ~57968, N=64 ~93921, N=256 ~85142
