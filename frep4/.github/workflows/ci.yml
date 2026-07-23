@@ -1,0 +1,287 @@
+name: build-and-test
+
+# Continuous integration for FRep Designer.
+#
+# Runs on every push and pull request to the main branch. Builds the
+# project with both LLVM 20 and LLVM 21+ (using the system clang of
+# Ubuntu 24.04 and a more recent toolchain via apt's llvm.sh), runs
+# the full GoogleTest suite, and ensures the gallery + benchmark
+# tools can produce a non-empty render on Mesa's software Vulkan
+# driver (`llvmpipe`).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux-build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm: [20]   # add 21 once available in apt
+        build_type: [Release]
+    name: linux-llvm-${{ matrix.llvm }}-${{ matrix.build_type }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            cmake ninja-build \
+            clang-${{ matrix.llvm }} \
+            llvm-${{ matrix.llvm }}-dev \
+            llvm-spirv-${{ matrix.llvm }} \
+            qt6-base-dev qt6-tools-dev \
+            libgtest-dev libgmock-dev \
+            libvulkan-dev vulkan-tools glslang-tools \
+            mesa-vulkan-drivers
+
+      - name: Configure
+        run: |
+          cmake -B build -S . \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DLLVM_DIR=/usr/lib/llvm-${{ matrix.llvm }}/lib/cmake/llvm \
+            -DCMAKE_CXX_COMPILER=clang++-${{ matrix.llvm }} \
+            -DCMAKE_C_COMPILER=clang-${{ matrix.llvm }} \
+            -Wno-dev
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Run GoogleTest suite
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./build/frep_tests --gtest_brief=1
+
+      - name: Run ctest (includes headless Qt tests)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: cd build && ctest --output-on-failure
+
+      - name: Smoke-test CLI tools
+        run: |
+          mkdir -p smoke
+          ./build/frep_render smoke/cpu.ppm 200 150
+          ./build/frep_gpu_render smoke/gpu.ppm 200 150
+          ./build/frep_gallery smoke/gallery
+          ./build/frep_bench > smoke/bench.md
+          test -s smoke/cpu.ppm
+          test -s smoke/gpu.ppm
+          test -s smoke/gallery/01_csg.ppm
+          test -s smoke/bench.md
+
+      - name: Performance regression check
+        # Run frep_bench in JSON mode and diff against the committed
+        # baseline (tools/perf_baseline.json). Two separate thresholds:
+        # the CPU JIT path is well-behaved and stays within 2× of the
+        # baseline reliably; the GPU path on llvmpipe under GitHub-
+        # hosted runners shows higher variance, so we allow 3× there.
+        #
+        # When you intentionally land a perf change, regenerate the
+        # baseline locally with:
+        #     cmake --build build --target perf-update-baseline
+        # and commit tools/perf_baseline.json together with the change.
+        run: |
+          ./build/frep_bench --json > smoke/bench.json
+          python3 tools/perf_check.py smoke/bench.json \
+              --cpu-threshold 2.0 --gpu-threshold 3.0
+
+      - name: Render every example scene
+        run: |
+          mkdir -p smoke/examples
+          for f in examples/*.json; do
+            name=$(basename "$f" .json)
+            ./build/frep_gpu_render "smoke/examples/$name.ppm" 320 240 --scene "$f"
+            test -s "smoke/examples/$name.ppm"
+          done
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.llvm }}-${{ matrix.build_type }}
+          path: smoke/
+          retention-days: 14
+
+  shader-validate:
+    # Quick standalone job that just makes sure the hand-written
+    # shader stays SPIR-V-spec-clean.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt install -y glslang-tools spirv-tools
+      - run: |
+          glslangValidator -V gpu/sphere_trace.comp -o /tmp/sphere_trace.spv
+          spirv-val /tmp/sphere_trace.spv
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Cross-platform builds — Windows and macOS
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Both jobs are marked continue-on-error: the project is developed on
+  # Linux and these jobs are best-effort indicators of portability, not
+  # required checks. They will help catch obvious portability regressions
+  # (e.g. Linux-only headers, GCC-specific extensions) but their
+  # green-ness is not a release gate.
+  #
+  # When these jobs fail, the failure typically falls into one of three
+  # buckets:
+  #   1. Missing system dependency — fix by adjusting the install step
+  #   2. Platform-specific compile error — fix the offending source
+  #   3. Runtime issue with software Vulkan — usually skippable on these
+  #      platforms via env vars or test guards
+
+  windows-build:
+    runs-on: windows-2022
+    continue-on-error: true
+    name: windows-msvc-Release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 20
+        # Choco's `llvm` package tracks the latest stable release. The
+        # exact version is pinned via --version when we need to lock
+        # down a specific LLVM for compatibility testing.
+        shell: pwsh
+        run: |
+          choco install llvm --version=20.1.2 --yes --no-progress
+          echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install Vulkan SDK
+        # Vulkan SDK from LunarG; the choco package wires environment
+        # variables automatically (VULKAN_SDK, VK_SDK_PATH, PATH).
+        shell: pwsh
+        run: choco install vulkan-sdk --yes --no-progress
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.6.0'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          modules: ''
+          cache: true
+
+      - name: Set up vcpkg (for GoogleTest)
+        # GoogleTest isn't packaged by chocolatey; vcpkg is the most
+        # portable way to get it on Windows.
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg C:\vcpkg
+          C:\vcpkg\bootstrap-vcpkg.bat
+          C:\vcpkg\vcpkg.exe install gtest:x64-windows libpng:x64-windows
+
+      - name: Configure
+        # We use the Ninja generator with clang-cl so the CMake recipe
+        # matches the Linux setup as closely as possible. MSVC is also
+        # workable but tracks the C++26 standard less reliably.
+        shell: pwsh
+        run: |
+          cmake -B build -S . `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CXX_STANDARD=23
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release -j
+
+      - name: Run GoogleTest suite
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: .\build\Release\frep_tests.exe --gtest_brief=1
+
+      - name: Smoke-test CLI tools
+        shell: pwsh
+        run: |
+          mkdir smoke -Force
+          .\build\Release\frep_render.exe smoke\cpu.ppm 200 150
+          if (!(Test-Path smoke\cpu.ppm)) { throw "CPU render produced no output" }
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-windows
+          path: smoke/
+          retention-days: 14
+
+  macos-build:
+    runs-on: macos-14   # Apple silicon runner — M1
+    continue-on-error: true
+    name: macos-clang-Release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies via Homebrew
+        # Apple's clang (Xcode 15.x) ships with libc++ that doesn't yet
+        # fully implement all C++26 features the project uses. Pull
+        # LLVM 20 from Homebrew for the engine; Qt6 also comes from
+        # there. MoltenVK provides Vulkan-on-Metal translation.
+        run: |
+          brew update
+          brew install llvm@20 qt@6 vulkan-headers vulkan-loader molten-vk \
+                       googletest libpng glslang ninja
+
+      - name: Set up environment
+        # Homebrew on Apple silicon installs to /opt/homebrew; LLVM is
+        # kegged so we have to point CMake at it explicitly.
+        run: |
+          echo "LLVM_PREFIX=/opt/homebrew/opt/llvm@20" >> $GITHUB_ENV
+          echo "PATH=/opt/homebrew/opt/llvm@20/bin:/opt/homebrew/opt/qt@6/bin:$PATH" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=/opt/homebrew/opt/qt@6:/opt/homebrew" >> $GITHUB_ENV
+          # MoltenVK is a Vulkan-1.2-compatible layer over Metal. The
+          # MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1 setting cuts shader
+          # compile time roughly in half.
+          echo "DYLD_LIBRARY_PATH=/opt/homebrew/lib" >> $GITHUB_ENV
+          echo "VK_ICD_FILENAMES=/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json" >> $GITHUB_ENV
+          echo "VK_LAYER_PATH=/opt/homebrew/share/vulkan/explicit_layer.d" >> $GITHUB_ENV
+
+      - name: Configure
+        run: |
+          cmake -B build -S . \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm@20/bin/clang \
+            -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm@20/bin/clang++ \
+            -DLLVM_DIR=/opt/homebrew/opt/llvm@20/lib/cmake/llvm \
+            -DCMAKE_PREFIX_PATH="/opt/homebrew/opt/qt@6;/opt/homebrew" \
+            -Wno-dev
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Run GoogleTest suite
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./build/frep_tests --gtest_brief=1
+
+      - name: Smoke-test CLI tools
+        # On macOS without a real GPU under CI, the GPU path may or
+        # may not work depending on the Metal driver state. We only
+        # require the CPU path here; the GPU smoke is best-effort.
+        run: |
+          mkdir -p smoke
+          ./build/frep_render smoke/cpu.ppm 200 150
+          test -s smoke/cpu.ppm || (echo "CPU render produced no output" && exit 1)
+          # GPU path is best-effort on macOS via MoltenVK.
+          ./build/frep_gpu_render smoke/gpu.ppm 200 150 || \
+            echo "GPU render unavailable on this CI runner (expected with MoltenVK)"
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-macos
+          path: smoke/
+          retention-days: 14

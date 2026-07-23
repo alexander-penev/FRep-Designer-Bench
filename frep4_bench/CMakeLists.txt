@@ -29,7 +29,7 @@ else()
 endif()
 set(FREP_BUILD_OPENCL OFF CACHE BOOL "" FORCE)
 add_subdirectory(${FREP4_ROOT} ${CMAKE_BINARY_DIR}/frep4 EXCLUDE_FROM_ALL)
-foreach(t gen_scenes bench_grid tmpl_check)
+foreach(t gen_scenes bench_grid tmpl_check gen_structured bvh_probe)
   add_executable(frep4_${t} ${t}.cpp)
   target_include_directories(frep4_${t} PRIVATE ${FREP4_ROOT})
   target_link_libraries(frep4_${t} PRIVATE frep_core)
@@ -45,4 +45,17 @@ if(FREP4_BENCH_RENDER)
   # frep_core plus whatever GPU/RTX libs the tree exposes when FREP_BUILD_GPU=ON.
   target_link_libraries(frep4_bench_render PRIVATE frep_core)
   set_property(TARGET frep4_bench_render PROPERTY CXX_STANDARD 26)
+
+  # The ray-query test: SBT intersection-shader march vs rayQueryEXT compute
+  # march, same TLAS. Needs the GPU/RT build (VK_KHR_ray_query on the device).
+  add_executable(frep4_rq_bench rq_bench.cpp)
+  target_include_directories(frep4_rq_bench PRIVATE ${FREP4_ROOT})
+  target_link_libraries(frep4_rq_bench PRIVATE frep_core)
+  set_property(TARGET frep4_rq_bench PROPERTY CXX_STANDARD 26)
+
+  # Separate build from run for every render path (the fair build-vs-run table).
+  add_executable(frep4_pathcost pathcost.cpp)
+  target_include_directories(frep4_pathcost PRIVATE ${FREP4_ROOT})
+  target_link_libraries(frep4_pathcost PRIVATE frep_core)
+  set_property(TARGET frep4_pathcost PROPERTY CXX_STANDARD 26)
 endif()

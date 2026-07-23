@@ -7,11 +7,12 @@
 # Upstream sources fetched by common/fetch.sh into these placeholder dirs.
 # Ignore the fetched contents but keep the .gitkeep placeholders tracked, so a
 # fresh clone still has the directories that resolve_root fetches into.
-/frep4/*
+# frep4 is NOT here: it is vendored (tracked in-tree, see frep4/ and
+# frep4_bench/build.sh) rather than fetched + patched; its own frep4/.gitignore
+# keeps build artifacts out.
 /hyperfun/*
 /libfive/*
 /mpr/*
-!/frep4/.gitkeep
 !/hyperfun/.gitkeep
 !/libfive/.gitkeep
 !/mpr/.gitkeep

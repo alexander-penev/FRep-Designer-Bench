@@ -1,0 +1,166 @@
+# Doxygen configuration for FRep Designer 4.0
+#
+# Generates HTML API reference from the project's source code. Run:
+#   doxygen Doxyfile
+# Output goes to docs/api/html/ (gitignored).
+#
+# To install doxygen on Ubuntu:
+#   sudo apt install doxygen graphviz
+# Graphviz is optional but gives nice class/include graphs.
+
+# ──── Project ───────────────────────────────────────────────────────────────
+PROJECT_NAME           = "FRep Designer"
+PROJECT_NUMBER         = "4.31.65"
+PROJECT_BRIEF          = "F-Rep geometric modeling system — C++26 + LLVM + Vulkan"
+
+OUTPUT_DIRECTORY       = docs/api
+CREATE_SUBDIRS         = NO
+ALLOW_UNICODE_NAMES    = YES
+OUTPUT_LANGUAGE        = English
+BRIEF_MEMBER_DESC      = YES
+REPEAT_BRIEF           = YES
+ALWAYS_DETAILED_SEC    = YES
+INLINE_INHERITED_MEMB  = YES
+FULL_PATH_NAMES        = NO
+TAB_SIZE               = 4
+
+# Treat // comments adjacent to declarations as Doxygen comments,
+# matching the project's documentation style.
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MULTILINE_CPP_IS_BRIEF = NO
+INHERIT_DOCS           = YES
+SEPARATE_MEMBER_PAGES  = NO
+
+# ──── Build ─────────────────────────────────────────────────────────────────
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+EXTRACT_LOCAL_METHODS  = NO
+EXTRACT_ANON_NSPACES   = NO
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+HIDE_FRIEND_COMPOUNDS  = NO
+HIDE_IN_BODY_DOCS      = NO
+
+INTERNAL_DOCS          = NO
+CASE_SENSE_NAMES       = YES
+HIDE_SCOPE_NAMES       = NO
+HIDE_COMPOUND_REFERENCE= NO
+SHOW_INCLUDE_FILES     = YES
+SHOW_GROUPED_MEMB_INC  = NO
+FORCE_LOCAL_INCLUDES   = NO
+INLINE_INFO            = YES
+SORT_MEMBER_DOCS       = YES
+SORT_BRIEF_DOCS        = NO
+SORT_MEMBERS_CTORS_1ST = YES
+SORT_GROUP_NAMES       = NO
+SORT_BY_SCOPE_NAME     = YES
+
+# ──── Warnings ──────────────────────────────────────────────────────────────
+QUIET                  = NO
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = NO
+WARN_FORMAT            = "$file:$line: $text"
+
+# ──── Input ─────────────────────────────────────────────────────────────────
+INPUT                  = core/ \
+                         gui/ \
+                         plugins/ \
+                         README.md \
+                         docs/USER_GUIDE.md \
+                         docs/ARCHITECTURE.md \
+                         docs/GALLERY.md \
+                         docs/BENCHMARKS.md \
+                         docs/TUTORIAL.md \
+                         docs/PLUGIN_AUTHORING.md \
+                         docs/PERFORMANCE_TUNING.md
+USE_MDFILE_AS_MAINPAGE = README.md
+
+# Use GitHub-style auto-generated anchors so [link](#section-heading) inside
+# .md files resolves to the corresponding "## Section heading" without
+# requiring explicit {#section-heading} suffixes.
+MARKDOWN_ID_STYLE      = GITHUB
+
+INPUT_ENCODING         = UTF-8
+FILE_PATTERNS          = *.cpp *.hpp *.h *.md
+RECURSIVE              = YES
+EXCLUDE                = build/ \
+                         core/io/json.hpp
+EXCLUDE_SYMLINKS       = NO
+EXCLUDE_PATTERNS       = */build/* */tests/*
+EXAMPLE_PATH           = examples/
+EXAMPLE_PATTERNS       = *.json
+IMAGE_PATH             = docs/gallery/
+
+# ──── Source browser ────────────────────────────────────────────────────────
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+REFERENCES_LINK_SOURCE = YES
+SOURCE_TOOLTIPS        = YES
+USE_HTAGS              = NO
+VERBATIM_HEADERS       = YES
+
+# ──── HTML output ───────────────────────────────────────────────────────────
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+HTML_FILE_EXTENSION    = .html
+HTML_COLORSTYLE        = LIGHT
+HTML_DYNAMIC_SECTIONS  = NO
+HTML_INDEX_NUM_ENTRIES = 100
+DISABLE_INDEX          = NO
+GENERATE_TREEVIEW      = YES
+TREEVIEW_WIDTH         = 250
+EXT_LINKS_IN_WINDOW    = NO
+
+SEARCHENGINE           = YES
+SERVER_BASED_SEARCH    = NO
+
+# ──── Other output formats (disabled — HTML is enough) ──────────────────────
+GENERATE_LATEX         = NO
+GENERATE_RTF           = NO
+GENERATE_MAN           = NO
+GENERATE_XML           = NO
+GENERATE_DOCBOOK       = NO
+GENERATE_AUTOGEN_DEF   = NO
+GENERATE_PERLMOD       = NO
+
+# ──── Preprocessor ──────────────────────────────────────────────────────────
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = NO
+EXPAND_ONLY_PREDEF     = NO
+SEARCH_INCLUDES        = YES
+INCLUDE_PATH           = .
+SKIP_FUNCTION_MACROS   = YES
+
+PREDEFINED             = FREP_BUILD_GPU \
+                         FREP_HAS_LIBPNG
+
+# ──── Graphs (require graphviz) ─────────────────────────────────────────────
+HAVE_DOT               = YES
+DOT_NUM_THREADS        = 0
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = YES
+GROUP_GRAPHS           = YES
+UML_LOOK               = NO
+TEMPLATE_RELATIONS     = NO
+INCLUDE_GRAPH          = YES
+INCLUDED_BY_GRAPH      = YES
+CALL_GRAPH             = NO
+CALLER_GRAPH           = NO
+GRAPHICAL_HIERARCHY    = YES
+DIRECTORY_GRAPH        = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+DOT_GRAPH_MAX_NODES    = 50
+MAX_DOT_GRAPH_DEPTH    = 3
+DOT_MULTI_TARGETS      = YES
+GENERATE_LEGEND        = YES
+DOT_CLEANUP            = YES

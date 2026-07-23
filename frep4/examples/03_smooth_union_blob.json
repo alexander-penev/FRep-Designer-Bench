@@ -1,0 +1,123 @@
+{
+  "camera": {
+    "fov_deg": 60,
+    "ortho_size": 4,
+    "position": [
+      0,
+      1.5,
+      4
+    ],
+    "projection": "perspective",
+    "target": [
+      0,
+      0,
+      0
+    ],
+    "up": [
+      0,
+      1,
+      0
+    ]
+  },
+  "lights": [
+    {
+      "color": [
+        1,
+        0.97,
+        0.9
+      ],
+      "intensity": 1,
+      "pos": [
+        5,
+        7,
+        4
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "geometry": {
+        "children": [
+          {
+            "children": [
+              {
+                "id": "a",
+                "params": {
+                  "r": 0.5
+                },
+                "type": "Sphere"
+              }
+            ],
+            "id": "at",
+            "params": {
+              "tx": -0.3,
+              "ty": 0,
+              "tz": 0
+            },
+            "type": "Translate"
+          },
+          {
+            "children": [
+              {
+                "id": "b",
+                "params": {
+                  "r": 0.5
+                },
+                "type": "Sphere"
+              }
+            ],
+            "id": "bt",
+            "params": {
+              "tx": 0.3,
+              "ty": 0.1,
+              "tz": 0
+            },
+            "type": "Translate"
+          }
+        ],
+        "id": "blob",
+        "params": {
+          "k": 0.25
+        },
+        "type": "SmoothUnion"
+      },
+      "id": "blob",
+      "material": {
+        "albedo": [
+          0.4,
+          0.95,
+          0.6
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "id": "floor",
+        "params": {
+          "d": 1,
+          "nx": 0,
+          "ny": 1,
+          "nz": 0
+        },
+        "type": "Plane"
+      },
+      "id": "floor",
+      "material": {
+        "albedo": [
+          0.55,
+          0.55,
+          0.55
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    }
+  ],
+  "version": "4.0"
+}

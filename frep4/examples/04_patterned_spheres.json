@@ -1,0 +1,160 @@
+{
+  "camera": {
+    "fov_deg": 60,
+    "ortho_size": 4,
+    "position": [
+      0,
+      1.8,
+      5.5
+    ],
+    "projection": "perspective",
+    "target": [
+      0,
+      0,
+      0
+    ],
+    "up": [
+      0,
+      1,
+      0
+    ]
+  },
+  "lights": [
+    {
+      "color": [
+        1,
+        0.97,
+        0.9
+      ],
+      "intensity": 1,
+      "pos": [
+        5,
+        7,
+        4
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "s3",
+            "params": {
+              "r": 0.6
+            },
+            "type": "Sphere"
+          }
+        ],
+        "id": "s3t",
+        "params": {
+          "tx": 1.5,
+          "ty": 0,
+          "tz": 0
+        },
+        "type": "Translate"
+      },
+      "id": "s3t",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.2
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "s2",
+            "params": {
+              "r": 0.6
+            },
+            "type": "Sphere"
+          }
+        ],
+        "id": "s2t",
+        "params": {
+          "tx": 0,
+          "ty": 0,
+          "tz": 0
+        },
+        "type": "Translate"
+      },
+      "id": "s2t",
+      "material": {
+        "albedo": [
+          0.95,
+          0.95,
+          0.95
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "s1",
+            "params": {
+              "r": 0.6
+            },
+            "type": "Sphere"
+          }
+        ],
+        "id": "s1t",
+        "params": {
+          "tx": -1.5,
+          "ty": 0,
+          "tz": 0
+        },
+        "type": "Translate"
+      },
+      "id": "s1t",
+      "material": {
+        "albedo": [
+          0.9,
+          0.3,
+          0.3
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "id": "floor",
+        "params": {
+          "d": 1,
+          "nx": 0,
+          "ny": 1,
+          "nz": 0
+        },
+        "type": "Plane"
+      },
+      "id": "floor",
+      "material": {
+        "albedo": [
+          0.55,
+          0.55,
+          0.55
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    }
+  ],
+  "version": "4.0"
+}

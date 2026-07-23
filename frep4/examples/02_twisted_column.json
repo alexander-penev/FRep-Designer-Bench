@@ -1,0 +1,96 @@
+{
+  "camera": {
+    "fov_deg": 60,
+    "ortho_size": 4,
+    "position": [
+      0,
+      1.8,
+      5.5
+    ],
+    "projection": "perspective",
+    "target": [
+      0,
+      0,
+      0
+    ],
+    "up": [
+      0,
+      1,
+      0
+    ]
+  },
+  "lights": [
+    {
+      "color": [
+        1,
+        0.97,
+        0.9
+      ],
+      "intensity": 1,
+      "pos": [
+        5,
+        7,
+        4
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b",
+            "params": {
+              "hx": 0.3,
+              "hy": 1,
+              "hz": 0.3
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "tw",
+        "params": {
+          "k": 2.5
+        },
+        "type": "TwistY"
+      },
+      "id": "tw",
+      "material": {
+        "albedo": [
+          0.95,
+          0.4,
+          0.3
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "id": "floor",
+        "params": {
+          "d": 1,
+          "nx": 0,
+          "ny": 1,
+          "nz": 0
+        },
+        "type": "Plane"
+      },
+      "id": "floor",
+      "material": {
+        "albedo": [
+          0.55,
+          0.55,
+          0.55
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    }
+  ],
+  "version": "4.0"
+}

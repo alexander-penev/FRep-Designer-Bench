@@ -1,0 +1,32 @@
+{
+  "meta": {"gpu_available": true},
+  "cpu": [
+    {"scene": "Simple (1 sphere)", "size": "400x300", "ms": 71.59},
+    {"scene": "Simple (1 sphere)", "size": "800x600", "ms": 284.87},
+    {"scene": "Simple (1 sphere)", "size": "1280x720", "ms": 571.46},
+    {"scene": "Moderate (CSG diff)", "size": "400x300", "ms": 79.15},
+    {"scene": "Moderate (CSG diff)", "size": "800x600", "ms": 317.91},
+    {"scene": "Moderate (CSG diff)", "size": "1280x720", "ms": 625.89},
+    {"scene": "Complex (5 objs, deforms)", "size": "400x300", "ms": 369.76},
+    {"scene": "Complex (5 objs, deforms)", "size": "800x600", "ms": 1481.88},
+    {"scene": "Complex (5 objs, deforms)", "size": "1280x720", "ms": 2922.14},
+    {"scene": "Heavy (MeshSDF + CSG)", "size": "400x300", "ms": 172.09},
+    {"scene": "Heavy (MeshSDF + CSG)", "size": "800x600", "ms": 687.82},
+    {"scene": "Heavy (MeshSDF + CSG)", "size": "1280x720", "ms": 1367.59},
+    {"scene": "CustomExpr (gyroid)", "size": "400x300", "ms": 166.03},
+    {"scene": "CustomExpr (gyroid)", "size": "800x600", "ms": 653.06},
+    {"scene": "CustomExpr (gyroid)", "size": "1280x720", "ms": 1358.40}
+  ],
+  "gpu": [
+    {"scene": "Simple (1 sphere)", "size": "400x300", "ms": 23.98},
+    {"scene": "Simple (1 sphere)", "size": "800x600", "ms": 89.61},
+    {"scene": "Moderate (CSG diff)", "size": "400x300", "ms": 26.91},
+    {"scene": "Moderate (CSG diff)", "size": "800x600", "ms": 94.10},
+    {"scene": "Complex (5 objs, deforms)", "size": "400x300", "ms": 95.95},
+    {"scene": "Complex (5 objs, deforms)", "size": "800x600", "ms": 377.40},
+    {"scene": "Heavy (MeshSDF + CSG)", "size": "400x300", "ms": 120.46},
+    {"scene": "Heavy (MeshSDF + CSG)", "size": "800x600", "ms": 466.63},
+    {"scene": "CustomExpr (gyroid)", "size": "400x300", "ms": 42.88},
+    {"scene": "CustomExpr (gyroid)", "size": "800x600", "ms": 166.84}
+  ]
+}

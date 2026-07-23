@@ -1,0 +1,230 @@
+{
+  "camera": {
+    "fov_deg": 60,
+    "ortho_size": 4,
+    "position": [
+      0,
+      1.8,
+      5.5
+    ],
+    "projection": "perspective",
+    "target": [
+      0,
+      0,
+      0
+    ],
+    "up": [
+      0,
+      1,
+      0
+    ]
+  },
+  "lights": [
+    {
+      "color": [
+        1,
+        0.97,
+        0.9
+      ],
+      "intensity": 1,
+      "pos": [
+        5,
+        7,
+        4
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "geometry": {
+        "children": [
+          {
+            "children": [
+              {
+                "id": "sC",
+                "params": {
+                  "r": 0.9
+                },
+                "type": "Sphere"
+              },
+              {
+                "id": "bC",
+                "params": {
+                  "hx": 0.6,
+                  "hy": 0.6,
+                  "hz": 0.6
+                },
+                "type": "Box"
+              }
+            ],
+            "id": "lensC",
+            "params": {},
+            "type": "Intersection"
+          }
+        ],
+        "id": "ltC",
+        "params": {
+          "tx": 2,
+          "ty": 0,
+          "tz": 0
+        },
+        "type": "Translate"
+      },
+      "id": "ltC",
+      "material": {
+        "albedo": [
+          0.3,
+          0.5,
+          0.95
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "children": [
+              {
+                "id": "sb1",
+                "params": {
+                  "r": 0.6
+                },
+                "type": "Sphere"
+              }
+            ],
+            "id": "sb1t",
+            "params": {
+              "tx": -0.35,
+              "ty": 0,
+              "tz": 0
+            },
+            "type": "Translate"
+          },
+          {
+            "children": [
+              {
+                "id": "sb2",
+                "params": {
+                  "r": 0.55
+                },
+                "type": "Sphere"
+              }
+            ],
+            "id": "sb2t",
+            "params": {
+              "tx": 0.35,
+              "ty": 0.15,
+              "tz": 0
+            },
+            "type": "Translate"
+          }
+        ],
+        "id": "blob",
+        "params": {
+          "k": 0.3
+        },
+        "type": "SmoothUnion"
+      },
+      "id": "blob",
+      "material": {
+        "albedo": [
+          0.4,
+          0.95,
+          0.5
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "children": [
+              {
+                "id": "sA",
+                "params": {
+                  "r": 0.95
+                },
+                "type": "Sphere"
+              },
+              {
+                "children": [
+                  {
+                    "id": "bA",
+                    "params": {
+                      "hx": 0.55,
+                      "hy": 0.55,
+                      "hz": 0.55
+                    },
+                    "type": "Box"
+                  }
+                ],
+                "id": "btA",
+                "params": {
+                  "tx": 0.55,
+                  "ty": 0.45,
+                  "tz": 0.45
+                },
+                "type": "Translate"
+              }
+            ],
+            "id": "diffA",
+            "params": {},
+            "type": "Difference"
+          }
+        ],
+        "id": "ltA",
+        "params": {
+          "tx": -2,
+          "ty": 0,
+          "tz": 0
+        },
+        "type": "Translate"
+      },
+      "id": "ltA",
+      "material": {
+        "albedo": [
+          0.95,
+          0.5,
+          0.2
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "id": "floor",
+        "params": {
+          "d": 1,
+          "nx": 0,
+          "ny": 1,
+          "nz": 0
+        },
+        "type": "Plane"
+      },
+      "id": "floor",
+      "material": {
+        "albedo": [
+          0.55,
+          0.55,
+          0.55
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    }
+  ],
+  "version": "4.0"
+}

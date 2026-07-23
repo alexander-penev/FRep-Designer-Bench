@@ -3,8 +3,10 @@ set -e
 cd "$(dirname "$0")"
 SUITE_DIR=$(cd .. && pwd); export SUITE_DIR
 . ../common/fetch.sh
+# frep4 is vendored in-tree (see ../frep4), not fetched + patched: resolve_root
+# returns the in-tree copy unchanged (non-empty -> no fetch), and there is no
+# patch step. Set FREP4_ROOT to build against an external clone instead.
 ROOT=$(resolve_root FREP4_ROOT frep4)
-apply_patches "$ROOT" "$(pwd)/patches"
 # frep4 needs C++26 -> a recent clang; pick clang-22 else clang-20. Override with CXX/LLVM_DIR.
 if [ -z "$CXX" ]; then
   for v in 22 21 20; do command -v clang++-$v >/dev/null && { CXX=clang++-$v; CC=clang-$v; LLVM_DIR=${LLVM_DIR:-/usr/lib/llvm-$v/lib/cmake/llvm}; break; }; done

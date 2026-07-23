@@ -1,0 +1,2760 @@
+{
+  "camera": {
+    "fov_deg": 60,
+    "ortho_size": 4,
+    "position": [
+      11.25,
+      6.75,
+      11.25
+    ],
+    "projection": "perspective",
+    "target": [
+      0,
+      1.125,
+      0
+    ],
+    "up": [
+      0,
+      1,
+      0
+    ]
+  },
+  "lights": [
+    {
+      "color": [
+        1,
+        0.97,
+        0.9
+      ],
+      "intensity": 1,
+      "pos": [
+        11.25,
+        16.875,
+        5.625
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b63",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t63",
+        "params": {
+          "tx": 2.25,
+          "ty": 3,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t63",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b62",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t62",
+        "params": {
+          "tx": 2.25,
+          "ty": 3,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t62",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b61",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t61",
+        "params": {
+          "tx": 2.25,
+          "ty": 3,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t61",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b60",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t60",
+        "params": {
+          "tx": 2.25,
+          "ty": 3,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t60",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b21",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t21",
+        "params": {
+          "tx": -0.75,
+          "ty": 0,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t21",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b20",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t20",
+        "params": {
+          "tx": -0.75,
+          "ty": 0,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t20",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b19",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t19",
+        "params": {
+          "tx": -0.75,
+          "ty": -1.5,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t19",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b23",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t23",
+        "params": {
+          "tx": -0.75,
+          "ty": 0,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t23",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b51",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t51",
+        "params": {
+          "tx": 2.25,
+          "ty": -1.5,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t51",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b22",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t22",
+        "params": {
+          "tx": -0.75,
+          "ty": 0,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t22",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b3",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t3",
+        "params": {
+          "tx": -2.25,
+          "ty": -1.5,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t3",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b52",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t52",
+        "params": {
+          "tx": 2.25,
+          "ty": 0,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t52",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b59",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t59",
+        "params": {
+          "tx": 2.25,
+          "ty": 1.5,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t59",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b32",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t32",
+        "params": {
+          "tx": 0.75,
+          "ty": -1.5,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t32",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b43",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t43",
+        "params": {
+          "tx": 0.75,
+          "ty": 1.5,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t43",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b25",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t25",
+        "params": {
+          "tx": -0.75,
+          "ty": 1.5,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t25",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b14",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t14",
+        "params": {
+          "tx": -2.25,
+          "ty": 3,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t14",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b0",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t0",
+        "params": {
+          "tx": -2.25,
+          "ty": -1.5,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t0",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b41",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t41",
+        "params": {
+          "tx": 0.75,
+          "ty": 1.5,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t41",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b49",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t49",
+        "params": {
+          "tx": 2.25,
+          "ty": -1.5,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t49",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b16",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t16",
+        "params": {
+          "tx": -0.75,
+          "ty": -1.5,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t16",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b10",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t10",
+        "params": {
+          "tx": -2.25,
+          "ty": 1.5,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t10",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b27",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t27",
+        "params": {
+          "tx": -0.75,
+          "ty": 1.5,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t27",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b1",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t1",
+        "params": {
+          "tx": -2.25,
+          "ty": -1.5,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t1",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b48",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t48",
+        "params": {
+          "tx": 2.25,
+          "ty": -1.5,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t48",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b2",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t2",
+        "params": {
+          "tx": -2.25,
+          "ty": -1.5,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t2",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b17",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t17",
+        "params": {
+          "tx": -0.75,
+          "ty": -1.5,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t17",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b42",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t42",
+        "params": {
+          "tx": 0.75,
+          "ty": 1.5,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t42",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b4",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t4",
+        "params": {
+          "tx": -2.25,
+          "ty": 0,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t4",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b38",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t38",
+        "params": {
+          "tx": 0.75,
+          "ty": 0,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t38",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b6",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t6",
+        "params": {
+          "tx": -2.25,
+          "ty": 0,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t6",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b5",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t5",
+        "params": {
+          "tx": -2.25,
+          "ty": 0,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t5",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b9",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t9",
+        "params": {
+          "tx": -2.25,
+          "ty": 1.5,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t9",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b24",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t24",
+        "params": {
+          "tx": -0.75,
+          "ty": 1.5,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t24",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b29",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t29",
+        "params": {
+          "tx": -0.75,
+          "ty": 3,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t29",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b12",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t12",
+        "params": {
+          "tx": -2.25,
+          "ty": 3,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t12",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b8",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t8",
+        "params": {
+          "tx": -2.25,
+          "ty": 1.5,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t8",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b7",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t7",
+        "params": {
+          "tx": -2.25,
+          "ty": 0,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t7",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b11",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t11",
+        "params": {
+          "tx": -2.25,
+          "ty": 1.5,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t11",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b33",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t33",
+        "params": {
+          "tx": 0.75,
+          "ty": -1.5,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t33",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b30",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t30",
+        "params": {
+          "tx": -0.75,
+          "ty": 3,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t30",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b31",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t31",
+        "params": {
+          "tx": -0.75,
+          "ty": 3,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t31",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b35",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t35",
+        "params": {
+          "tx": 0.75,
+          "ty": -1.5,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t35",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b36",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t36",
+        "params": {
+          "tx": 0.75,
+          "ty": 0,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t36",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b37",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t37",
+        "params": {
+          "tx": 0.75,
+          "ty": 0,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t37",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b18",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t18",
+        "params": {
+          "tx": -0.75,
+          "ty": -1.5,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t18",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b47",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t47",
+        "params": {
+          "tx": 0.75,
+          "ty": 3,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t47",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b34",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t34",
+        "params": {
+          "tx": 0.75,
+          "ty": -1.5,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t34",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b39",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t39",
+        "params": {
+          "tx": 0.75,
+          "ty": 0,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t39",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b40",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t40",
+        "params": {
+          "tx": 0.75,
+          "ty": 1.5,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t40",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b44",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t44",
+        "params": {
+          "tx": 0.75,
+          "ty": 3,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t44",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b45",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t45",
+        "params": {
+          "tx": 0.75,
+          "ty": 3,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t45",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b13",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t13",
+        "params": {
+          "tx": -2.25,
+          "ty": 3,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t13",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b46",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t46",
+        "params": {
+          "tx": 0.75,
+          "ty": 3,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t46",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b50",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t50",
+        "params": {
+          "tx": 2.25,
+          "ty": -1.5,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t50",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "id": "floor",
+        "params": {
+          "d": 1,
+          "nx": 0,
+          "ny": 1,
+          "nz": 0
+        },
+        "type": "Plane"
+      },
+      "id": "floor",
+      "material": {
+        "albedo": [
+          0.55,
+          0.55,
+          0.55
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b26",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t26",
+        "params": {
+          "tx": -0.75,
+          "ty": 1.5,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t26",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b53",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t53",
+        "params": {
+          "tx": 2.25,
+          "ty": 0,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t53",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b57",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t57",
+        "params": {
+          "tx": 2.25,
+          "ty": 1.5,
+          "tz": -0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t57",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b54",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t54",
+        "params": {
+          "tx": 2.25,
+          "ty": 0,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t54",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b55",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t55",
+        "params": {
+          "tx": 2.25,
+          "ty": 0,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t55",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b15",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t15",
+        "params": {
+          "tx": -2.25,
+          "ty": 3,
+          "tz": 2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t15",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b56",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t56",
+        "params": {
+          "tx": 2.25,
+          "ty": 1.5,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t56",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b28",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t28",
+        "params": {
+          "tx": -0.75,
+          "ty": 3,
+          "tz": -2.25
+        },
+        "type": "Translate"
+      },
+      "id": "t28",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "id": "b58",
+            "params": {
+              "hx": 0.4,
+              "hy": 0.4,
+              "hz": 0.4
+            },
+            "type": "Box"
+          }
+        ],
+        "id": "t58",
+        "params": {
+          "tx": 2.25,
+          "ty": 1.5,
+          "tz": 0.75
+        },
+        "type": "Translate"
+      },
+      "id": "t58",
+      "material": {
+        "albedo": [
+          0.9,
+          0.6,
+          0.3
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    }
+  ],
+  "version": "4.0"
+}
