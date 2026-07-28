@@ -8,6 +8,7 @@
 #include <cmath>
 #include <future>
 #include <sstream>
+#include <cstring>
 #include <thread>
 
 namespace frep::exec {
@@ -116,6 +117,16 @@ namespace {
 void blit(std::vector<float>& img, int W, int H, const TileResult& r) {
     const Tile& t = r.tile;
     int tw = t.width();
+    // Fast path: tile fully inside the frame → row-wise memcpy. The scalar
+    // per-pixel loop below is only for tiles that overhang the frame.
+    if (t.x0 >= 0 && t.y0 >= 0 && t.x1 <= W && t.y1 <= H &&
+        r.rgba.size() >= (std::size_t)tw * t.height() * 4) {
+        for (int y = t.y0; y < t.y1; ++y)
+            std::memcpy(&img[((std::size_t)y * W + t.x0) * 4],
+                        &r.rgba[(std::size_t)(y - t.y0) * tw * 4],
+                        (std::size_t)tw * 4 * sizeof(float));
+        return;
+    }
     for (int y = t.y0; y < t.y1; ++y) {
         if (y < 0 || y >= H) continue;
         for (int x = t.x0; x < t.x1; ++x) {

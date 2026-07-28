@@ -59,3 +59,11 @@ if(FREP4_BENCH_RENDER)
   target_link_libraries(frep4_pathcost PRIVATE frep_core)
   set_property(TARGET frep4_pathcost PROPERTY CXX_STANDARD 26)
 endif()
+
+if(FREP4_BENCH_RENDER)
+  # Heterogeneous CPU+GPU split: the direct measurement of the additivity claim.
+  add_executable(frep4_hetero_bench hetero_bench.cpp)
+  target_include_directories(frep4_hetero_bench PRIVATE ${FREP4_ROOT})
+  target_link_libraries(frep4_hetero_bench PRIVATE frep_core)
+  set_property(TARGET frep4_hetero_bench PROPERTY CXX_STANDARD 26)
+endif()

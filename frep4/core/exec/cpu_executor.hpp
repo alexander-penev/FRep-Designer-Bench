@@ -17,6 +17,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -86,28 +87,46 @@ public:
         // a sub-frame costs proportionally less — no whole-frame waste).
         // We still allocate a full-frame buffer so tile coordinates map
         // directly, then copy out the region; only the region is computed.
-        std::vector<float> full((std::size_t)W * H * 4, 0.0f);
+        // Uninitialized on purpose: the scheduler fully writes every region
+        // pixel and only the region is copied out, so zero-filling W*H*4
+        // floats (tens of MB at high resolution) would be pure per-frame waste.
+        std::unique_ptr<float[]> full(new float[(std::size_t)W * H * 4]);
         RenderParams rp; rp.width = W; rp.height = H;
         rp.region_x0 = tile.x0; rp.region_y0 = tile.y0;
         rp.region_x1 = tile.x1; rp.region_y1 = tile.y1;
         if (const char* s = std::getenv("FREP4_SSAA")) rp.ssaa = std::max(1, atoi(s));
-        r.threads_used = (int)std::thread::hardware_concurrency();
+        // FREP4_CPU_THREADS caps the scheduler's thread pool — a frame split
+        // wants the CPU band to leave a core or two for the GPU path's
+        // submit/readback thread instead of starving it.
+        if (const char* s = std::getenv("FREP4_CPU_THREADS"))
+            rp.num_threads = std::max(1, atoi(s));
+        r.threads_used = rp.num_threads > 0
+            ? rp.num_threads : (int)std::thread::hardware_concurrency();
         auto t_r = clk::now();
-        TileScheduler::render(*fn, full.data(), scene.camera(), rp);
+        TileScheduler::render(*fn, full.get(), scene.camera(), rp);
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
 
-        // Copy the tile region into the result buffer.
+        // Copy the tile region into the result buffer. Row-wise memcpy when
+        // the tile is fully inside the frame (the common band/tile case).
         int tw = tile.width(), th = tile.height();
-        r.rgba.assign((std::size_t)tw * th * 4, 0.0f);
-        for (int y = 0; y < th; ++y) {
-            int sy = tile.y0 + y;
-            if (sy < 0 || sy >= H) continue;
-            for (int x = 0; x < tw; ++x) {
-                int sx = tile.x0 + x;
-                if (sx < 0 || sx >= W) continue;
-                std::size_t src = ((std::size_t)sy * W + sx) * 4;
-                std::size_t dst = ((std::size_t)y * tw + x) * 4;
-                for (int c = 0; c < 4; ++c) r.rgba[dst + c] = full[src + c];
+        if (tile.x0 >= 0 && tile.y0 >= 0 && tile.x1 <= W && tile.y1 <= H) {
+            r.rgba.resize((std::size_t)tw * th * 4);
+            for (int y = 0; y < th; ++y)
+                std::memcpy(&r.rgba[(std::size_t)y * tw * 4],
+                            &full[((std::size_t)(tile.y0 + y) * W + tile.x0) * 4],
+                            (std::size_t)tw * 4 * sizeof(float));
+        } else {
+            r.rgba.assign((std::size_t)tw * th * 4, 0.0f);
+            for (int y = 0; y < th; ++y) {
+                int sy = tile.y0 + y;
+                if (sy < 0 || sy >= H) continue;
+                for (int x = 0; x < tw; ++x) {
+                    int sx = tile.x0 + x;
+                    if (sx < 0 || sx >= W) continue;
+                    std::size_t src = ((std::size_t)sy * W + sx) * 4;
+                    std::size_t dst = ((std::size_t)y * tw + x) * 4;
+                    for (int c = 0; c < 4; ++c) r.rgba[dst + c] = full[src + c];
+                }
             }
         }
 
