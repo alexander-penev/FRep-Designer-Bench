@@ -28,6 +28,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -97,6 +98,39 @@ Run run_queue(std::vector<IExecutor*> execs, const SceneGraph& scene,
     return out;
 }
 
+
+// Keep `n` cores busy for as long as the object lives.
+//
+// A GPU-only configuration leaves the CPU idle, and an idle CPU drops to a low
+// power state that lengthens the latency of every submit and fence wait: on
+// this host the GPU-alone baseline measured 24 Mpix/s with the CPU idle and 52
+// Mpix/s with cores kept busy, on identical GPU work. Comparing that depressed
+// baseline against a combined run (whose CPU band keeps the package awake) is
+// what made composition look super-additive. The single-device runs therefore
+// carry a synthetic load so every configuration is measured with the machine in
+// the same state; the spinner touches no measured device, and CPU energy is not
+// attributed to a GPU-only run.
+class BusyLoad {
+public:
+    explicit BusyLoad(int n) {
+        if (n <= 0) return;
+        stop_.store(false);
+        for (int i = 0; i < n; ++i)
+            threads_.emplace_back([this] {
+                volatile double x = 1.0;
+                while (!stop_.load(std::memory_order_relaxed)) x = x * 1.000001 + 1.0;
+                (void)x;
+            });
+    }
+    ~BusyLoad() {
+        stop_.store(true, std::memory_order_relaxed);
+        for (auto& t : threads_) if (t.joinable()) t.join();
+    }
+private:
+    std::atomic<bool> stop_{true};
+    std::vector<std::thread> threads_;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -108,7 +142,7 @@ int main(int argc, char** argv) {
             argv[0]);
         return 2;
     }
-    int R = 800, tile_px = 128, frames = 10, rounds = 5;
+    int R = 800, tile_px = 128, frames = 10, rounds = 5, warmup_s = 4;
     std::vector<std::string> scenes;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -117,6 +151,7 @@ int main(int argc, char** argv) {
         else if (a == "--tile")   tile_px = next(tile_px);
         else if (a == "--frames") frames = next(frames);
         else if (a == "--rounds") rounds = next(rounds);
+        else if (a == "--warmup") warmup_s = next(warmup_s);
         else scenes.push_back(a);
     }
 
@@ -124,8 +159,8 @@ int main(int argc, char** argv) {
     auto gpu_e = make_gpu_energy_counter();
 
     std::printf("tile-queue heterogeneous throughput  %dx%d, %d-px tiles, "
-                "%d frames/run, %d interleaved rounds (medians)\n",
-                R, R, tile_px, frames, rounds);
+                "%d frames/run, %d interleaved rounds (medians), %ds warm-up\n",
+                R, R, tile_px, frames, rounds, warmup_s);
     std::printf("energy: cpu=%s gpu=%s\n\n",
                 cpu_e && cpu_e->available() ? cpu_e->domain().c_str() : "n/a",
                 gpu_e && gpu_e->available() ? gpu_e->domain().c_str() : "n/a");
@@ -155,15 +190,39 @@ int main(int argc, char** argv) {
         cpu->render(scene, R, R, full);
         gpu->render(scene, R, R, full);
 
+        // Then warm the *hardware*: an idle NVIDIA GPU sits at a low clock
+        // (615 MHz against a 2100 MHz maximum on this device) and boosts under
+        // sustained load, so the first measured configuration would run on a
+        // colder device than the last. That drift is what makes an isolated
+        // baseline differ by tens of percent between rounds -- and what can make
+        // a combined run look faster than the sum of its parts. Spin both
+        // devices for a few seconds first and discard the work.
+        {
+            auto t_warm = std::chrono::steady_clock::now();
+            while (std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - t_warm).count() < warmup_s) {
+                run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, 2, nullptr, nullptr);
+            }
+        }
+
         // Interleaved rounds: one sample of every mode per round, medians taken
         // per mode. Measuring each mode to completion in turn lets GPU clock
         // and thermal drift bias whichever mode ran in the hot (or cold) block
         // — which shows up as a combined throughput above the sum of the
         // separately measured parts. Interleaving spreads the drift evenly.
+        // How many cores the CPU executor uses, so the GPU-only run can be given
+        // an equivalent synthetic load (see BusyLoad).
+        int cpu_threads = 0;
+        if (const char* t = std::getenv("FREP4_CPU_THREADS")) cpu_threads = std::atoi(t);
+        if (cpu_threads <= 0) cpu_threads = (int)std::thread::hardware_concurrency();
+
         std::vector<Run> vc, vg, vh;
         for (int r = 0; r < rounds; ++r) {
             vc.push_back(run_queue({cpu.get()},            scene, R, R, tile_px, frames, cpu_e.get(), nullptr));
-            vg.push_back(run_queue({gpu.get()},            scene, R, R, tile_px, frames, nullptr, gpu_e.get()));
+            {
+                BusyLoad load(cpu_threads);   // match the combined run's CPU state
+                vg.push_back(run_queue({gpu.get()},        scene, R, R, tile_px, frames, nullptr, gpu_e.get()));
+            }
             vh.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, cpu_e.get(), gpu_e.get()));
         }
         auto median_run = [](std::vector<Run> v) {
