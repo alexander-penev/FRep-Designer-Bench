@@ -16,3 +16,6 @@
 !/hyperfun/.gitkeep
 !/libfive/.gitkeep
 !/mpr/.gitkeep
+
+# Downloaded installers (e.g. the CUDA local repo package) — never part of the suite.
+*.deb
