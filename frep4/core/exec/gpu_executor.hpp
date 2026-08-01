@@ -116,28 +116,18 @@ public:
         push.tile_x0 = tile.x0; push.tile_y0 = tile.y0;
         push.tile_x1 = tile.x1; push.tile_y1 = tile.y1;
 
-        std::vector<std::uint8_t> full;   // full-frame RGBA8 readback
+        std::vector<std::uint8_t> px;   // RGBA8 readback of just this tile
         auto t_r = clk::now();
-        auto rr = ctx_->render(push, full);
+        auto rr = ctx_->render(push, px);
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
         if (!rr) { r.error = "gpu render failed"; return r; }
 
-        // Crop tile region out of the full-frame readback, RGBA8 → float.
+        // The context reads back exactly the tile (tightly packed), so this is
+        // a straight RGBA8 → float conversion, not a crop out of a full frame.
         int tw = tile.width(), th = tile.height();
         r.rgba.assign((std::size_t)tw * th * 4, 0.0f);
-        for (int y = 0; y < th; ++y) {
-            int sy = tile.y0 + y;
-            if (sy < 0 || sy >= H) continue;
-            for (int x = 0; x < tw; ++x) {
-                int sx = tile.x0 + x;
-                if (sx < 0 || sx >= W) continue;
-                std::size_t src = ((std::size_t)sy * W + sx) * 4;
-                std::size_t dst = ((std::size_t)y * tw + x) * 4;
-                if (src + 3 < full.size())
-                    for (int c = 0; c < 4; ++c)
-                        r.rgba[dst + c] = full[src + c] / 255.0f;
-            }
-        }
+        std::size_t n = std::min(r.rgba.size(), px.size());
+        for (std::size_t i = 0; i < n; ++i) r.rgba[i] = px[i] / 255.0f;
 
         const auto& st = ctx_->stats();
         r.render_ms = st.render_ms > 0 ? st.render_ms : r.render_ms;

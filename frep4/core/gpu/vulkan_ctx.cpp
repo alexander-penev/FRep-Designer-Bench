@@ -40,6 +40,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
+
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -235,9 +237,18 @@ struct VulkanCtx::Impl {
         VK_TRY(vkCreateBuffer(device, &bci, nullptr, &staging));
         VkMemoryRequirements bmr{};
         vkGetBufferMemoryRequirements(device, staging, &bmr);
+        // Prefer HOST_CACHED: this buffer is read back by the CPU, and a
+        // host-coherent-only type is write-combined on NVIDIA, which the CPU
+        // reads at a few hundred MB/s. Fall back to plain coherent when the
+        // device exposes no cached host type.
         int btype = find_memory_type(physical_device, bmr.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+          | VK_MEMORY_PROPERTY_HOST_CACHED_BIT
           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (btype < 0)
+            btype = find_memory_type(physical_device, bmr.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+              | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         if (btype < 0) return std::unexpected("no host-visible memory");
         VkMemoryAllocateInfo bmai{};
         bmai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -698,12 +709,27 @@ VulkanCtx::render(const ShaderPush& push, std::vector<std::uint8_t>& out_rgba)
             0, 0, nullptr, 0, nullptr, 1, &ib);
     }
 
-    // Copy image -> staging buffer.
+    // Copy image -> staging buffer. Only the tile the shader actually computed
+    // is copied back: the compute path writes at absolute image coordinates
+    // (px = local + tile origin), so the sub-region [tx0,ty0)-(tx1,ty1) holds
+    // exactly this dispatch's pixels. Reading back the whole frame for every
+    // tile made a tiled render cost a full-frame transfer per tile (the
+    // dominant cost when many small tiles are queued across executors).
+    // tile_x1/y1 == 0 means "whole frame" (the push builder's default), which
+    // keeps every non-tiled caller byte-identical.
+    int tx0 = push.tile_x0, ty0 = push.tile_y0;
+    int tx1 = push.tile_x1, ty1 = push.tile_y1;
+    if (tx1 <= 0 || ty1 <= 0) { tx0 = 0; ty0 = 0; tx1 = w; ty1 = h; }
+    tx0 = std::clamp(tx0, 0, w); ty0 = std::clamp(ty0, 0, h);
+    tx1 = std::clamp(tx1, tx0, w); ty1 = std::clamp(ty1, ty0, h);
+    const int tw = tx1 - tx0, th = ty1 - ty0;
+
     VkBufferImageCopy bic{};
     bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     bic.imageSubresource.layerCount = 1;
-    bic.imageExtent                 = { static_cast<std::uint32_t>(w),
-                                        static_cast<std::uint32_t>(h), 1 };
+    bic.imageOffset                 = { tx0, ty0, 0 };
+    bic.imageExtent                 = { static_cast<std::uint32_t>(tw),
+                                        static_cast<std::uint32_t>(th), 1 };
     vkCmdCopyImageToBuffer(I.cmd_buf, I.image,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, I.staging, 1, &bic);
 
@@ -718,8 +744,10 @@ VulkanCtx::render(const ShaderPush& push, std::vector<std::uint8_t>& out_rgba)
     VK_TRY(vkQueueSubmit(I.compute_queue, 1, &si, I.fence));
     VK_TRY(vkWaitForFences(I.device, 1, &I.fence, VK_TRUE, ~0ULL));
 
-    // Map and copy.
-    std::size_t expected_size = static_cast<std::size_t>(w) * h * 4;
+    // Map and copy. The staging buffer holds the tile tightly packed, so the
+    // caller's buffer is tile-sized (tw*th*4) — equal to the full frame when
+    // no tile was requested.
+    std::size_t expected_size = static_cast<std::size_t>(tw) * th * 4;
     out_rgba.resize(expected_size);
     void* mapped = nullptr;
     VK_TRY(vkMapMemory(I.device, I.staging_mem, 0, I.staging_sz, 0, &mapped));

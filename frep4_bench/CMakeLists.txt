@@ -66,4 +66,11 @@ if(FREP4_BENCH_RENDER)
   target_include_directories(frep4_hetero_bench PRIVATE ${FREP4_ROOT})
   target_link_libraries(frep4_hetero_bench PRIVATE frep_core)
   set_property(TARGET frep4_hetero_bench PROPERTY CXX_STANDARD 26)
+
+  # Heterogeneous THROUGHPUT via a shared tile queue (the additive quantity;
+  # hetero_bench measures single-frame latency, which is barrier-bound).
+  add_executable(frep4_tilequeue_bench tilequeue_bench.cpp)
+  target_include_directories(frep4_tilequeue_bench PRIVATE ${FREP4_ROOT})
+  target_link_libraries(frep4_tilequeue_bench PRIVATE frep_core)
+  set_property(TARGET frep4_tilequeue_bench PROPERTY CXX_STANDARD 26)
 endif()

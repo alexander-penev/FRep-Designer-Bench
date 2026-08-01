@@ -163,8 +163,12 @@ public:
     VulkanCtx(const VulkanCtx&)            = delete;
     VulkanCtx& operator=(const VulkanCtx&) = delete;
 
-    // Renders into a CPU-side buffer of size width * height * 4 bytes
-    // (RGBA8). The buffer is reallocated if the size changes.
+    // Renders into a CPU-side RGBA8 buffer, reallocated if the size changes.
+    // The buffer holds exactly the region the dispatch computed: the whole
+    // frame (width * height * 4 bytes) normally, or just the requested tile
+    // (tile_w * tile_h * 4, tightly packed, row 0 = tile_y0) when `push` sets
+    // a tile sub-region (tile_x1/y1 > 0). Reading back only the tile keeps a
+    // tiled render from paying a full-frame transfer per tile.
     std::expected<void, std::string>
     render(const ShaderPush& push, std::vector<std::uint8_t>& out_rgba);
 
