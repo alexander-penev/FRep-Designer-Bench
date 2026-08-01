@@ -1,0 +1,508 @@
+{
+  "camera": {
+    "fov_deg": 60,
+    "ortho_size": 4,
+    "position": [
+      0,
+      2,
+      7
+    ],
+    "projection": "perspective",
+    "target": [
+      0,
+      0,
+      0
+    ],
+    "up": [
+      0,
+      1,
+      0
+    ]
+  },
+  "lights": [
+    {
+      "color": [
+        1,
+        1,
+        1
+      ],
+      "intensity": 1,
+      "pos": [
+        5,
+        10,
+        5
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "geometry": {
+        "aabb": [
+          0.81,
+          -0.09,
+          -0.22,
+          1.03,
+          0.09,
+          0.22
+        ],
+        "expr": "max(max(abs(x-0.92)-0.11, abs(y)-0.09), abs(z)-0.22)",
+        "id": "proto_6759744985845122770",
+        "params": {},
+        "type": "CustomExpr"
+      },
+      "id": "proto_6759744985845122770",
+      "material": {
+        "albedo": [
+          0.8,
+          0.8,
+          0.8
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": false
+    },
+    {
+      "geometry": {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "children": [
+                              {
+                                "children": [
+                                  {
+                                    "children": [
+                                      {
+                                        "children": [
+                                          {
+                                            "children": [
+                                              {
+                                                "children": [
+                                                  {
+                                                    "children": [
+                                                      {
+                                                        "children": [
+                                                          {
+                                                            "children": [
+                                                              {
+                                                                "children": [
+                                                                  {
+                                                                    "children": [
+                                                                      {
+                                                                        "children": [
+                                                                          {
+                                                                            "children": [
+                                                                              {
+                                                                                "aabb": [
+                                                                                  -0.85,
+                                                                                  -0.85,
+                                                                                  -0.22,
+                                                                                  0.85,
+                                                                                  0.85,
+                                                                                  0.22
+                                                                                ],
+                                                                                "expr": "max(max(sqrt(x*x+y*y)-0.85, abs(z)-0.22), 0.0-(max(sqrt(x*x+y*y)-0.28, abs(z)-0.5)))",
+                                                                                "id": "body",
+                                                                                "params": {},
+                                                                                "type": "CustomExpr"
+                                                                              },
+                                                                              {
+                                                                                "children": [
+                                                                                  {
+                                                                                    "id": "inst",
+                                                                                    "params": {},
+                                                                                    "target_id": "proto_6759744985845122770",
+                                                                                    "type": "Instance"
+                                                                                  }
+                                                                                ],
+                                                                                "id": "rz0",
+                                                                                "params": {
+                                                                                  "a": 0
+                                                                                },
+                                                                                "type": "RotateZ"
+                                                                              }
+                                                                            ],
+                                                                            "id": "union",
+                                                                            "params": {},
+                                                                            "type": "Union"
+                                                                          },
+                                                                          {
+                                                                            "children": [
+                                                                              {
+                                                                                "id": "inst",
+                                                                                "params": {},
+                                                                                "target_id": "proto_6759744985845122770",
+                                                                                "type": "Instance"
+                                                                              }
+                                                                            ],
+                                                                            "id": "rz1",
+                                                                            "params": {
+                                                                              "a": 0.349066
+                                                                            },
+                                                                            "type": "RotateZ"
+                                                                          }
+                                                                        ],
+                                                                        "id": "union",
+                                                                        "params": {},
+                                                                        "type": "Union"
+                                                                      },
+                                                                      {
+                                                                        "children": [
+                                                                          {
+                                                                            "id": "inst",
+                                                                            "params": {},
+                                                                            "target_id": "proto_6759744985845122770",
+                                                                            "type": "Instance"
+                                                                          }
+                                                                        ],
+                                                                        "id": "rz2",
+                                                                        "params": {
+                                                                          "a": 0.698132
+                                                                        },
+                                                                        "type": "RotateZ"
+                                                                      }
+                                                                    ],
+                                                                    "id": "union",
+                                                                    "params": {},
+                                                                    "type": "Union"
+                                                                  },
+                                                                  {
+                                                                    "children": [
+                                                                      {
+                                                                        "id": "inst",
+                                                                        "params": {},
+                                                                        "target_id": "proto_6759744985845122770",
+                                                                        "type": "Instance"
+                                                                      }
+                                                                    ],
+                                                                    "id": "rz3",
+                                                                    "params": {
+                                                                      "a": 1.0472
+                                                                    },
+                                                                    "type": "RotateZ"
+                                                                  }
+                                                                ],
+                                                                "id": "union",
+                                                                "params": {},
+                                                                "type": "Union"
+                                                              },
+                                                              {
+                                                                "children": [
+                                                                  {
+                                                                    "id": "inst",
+                                                                    "params": {},
+                                                                    "target_id": "proto_6759744985845122770",
+                                                                    "type": "Instance"
+                                                                  }
+                                                                ],
+                                                                "id": "rz4",
+                                                                "params": {
+                                                                  "a": 1.39626
+                                                                },
+                                                                "type": "RotateZ"
+                                                              }
+                                                            ],
+                                                            "id": "union",
+                                                            "params": {},
+                                                            "type": "Union"
+                                                          },
+                                                          {
+                                                            "children": [
+                                                              {
+                                                                "id": "inst",
+                                                                "params": {},
+                                                                "target_id": "proto_6759744985845122770",
+                                                                "type": "Instance"
+                                                              }
+                                                            ],
+                                                            "id": "rz5",
+                                                            "params": {
+                                                              "a": 1.74533
+                                                            },
+                                                            "type": "RotateZ"
+                                                          }
+                                                        ],
+                                                        "id": "union",
+                                                        "params": {},
+                                                        "type": "Union"
+                                                      },
+                                                      {
+                                                        "children": [
+                                                          {
+                                                            "id": "inst",
+                                                            "params": {},
+                                                            "target_id": "proto_6759744985845122770",
+                                                            "type": "Instance"
+                                                          }
+                                                        ],
+                                                        "id": "rz6",
+                                                        "params": {
+                                                          "a": 2.0944
+                                                        },
+                                                        "type": "RotateZ"
+                                                      }
+                                                    ],
+                                                    "id": "union",
+                                                    "params": {},
+                                                    "type": "Union"
+                                                  },
+                                                  {
+                                                    "children": [
+                                                      {
+                                                        "id": "inst",
+                                                        "params": {},
+                                                        "target_id": "proto_6759744985845122770",
+                                                        "type": "Instance"
+                                                      }
+                                                    ],
+                                                    "id": "rz7",
+                                                    "params": {
+                                                      "a": 2.44346
+                                                    },
+                                                    "type": "RotateZ"
+                                                  }
+                                                ],
+                                                "id": "union",
+                                                "params": {},
+                                                "type": "Union"
+                                              },
+                                              {
+                                                "children": [
+                                                  {
+                                                    "id": "inst",
+                                                    "params": {},
+                                                    "target_id": "proto_6759744985845122770",
+                                                    "type": "Instance"
+                                                  }
+                                                ],
+                                                "id": "rz8",
+                                                "params": {
+                                                  "a": 2.79253
+                                                },
+                                                "type": "RotateZ"
+                                              }
+                                            ],
+                                            "id": "union",
+                                            "params": {},
+                                            "type": "Union"
+                                          },
+                                          {
+                                            "children": [
+                                              {
+                                                "id": "inst",
+                                                "params": {},
+                                                "target_id": "proto_6759744985845122770",
+                                                "type": "Instance"
+                                              }
+                                            ],
+                                            "id": "rz9",
+                                            "params": {
+                                              "a": 3.14159
+                                            },
+                                            "type": "RotateZ"
+                                          }
+                                        ],
+                                        "id": "union",
+                                        "params": {},
+                                        "type": "Union"
+                                      },
+                                      {
+                                        "children": [
+                                          {
+                                            "id": "inst",
+                                            "params": {},
+                                            "target_id": "proto_6759744985845122770",
+                                            "type": "Instance"
+                                          }
+                                        ],
+                                        "id": "rz10",
+                                        "params": {
+                                          "a": 3.49066
+                                        },
+                                        "type": "RotateZ"
+                                      }
+                                    ],
+                                    "id": "union",
+                                    "params": {},
+                                    "type": "Union"
+                                  },
+                                  {
+                                    "children": [
+                                      {
+                                        "id": "inst",
+                                        "params": {},
+                                        "target_id": "proto_6759744985845122770",
+                                        "type": "Instance"
+                                      }
+                                    ],
+                                    "id": "rz11",
+                                    "params": {
+                                      "a": 3.83972
+                                    },
+                                    "type": "RotateZ"
+                                  }
+                                ],
+                                "id": "union",
+                                "params": {},
+                                "type": "Union"
+                              },
+                              {
+                                "children": [
+                                  {
+                                    "id": "inst",
+                                    "params": {},
+                                    "target_id": "proto_6759744985845122770",
+                                    "type": "Instance"
+                                  }
+                                ],
+                                "id": "rz12",
+                                "params": {
+                                  "a": 4.18879
+                                },
+                                "type": "RotateZ"
+                              }
+                            ],
+                            "id": "union",
+                            "params": {},
+                            "type": "Union"
+                          },
+                          {
+                            "children": [
+                              {
+                                "id": "inst",
+                                "params": {},
+                                "target_id": "proto_6759744985845122770",
+                                "type": "Instance"
+                              }
+                            ],
+                            "id": "rz13",
+                            "params": {
+                              "a": 4.53786
+                            },
+                            "type": "RotateZ"
+                          }
+                        ],
+                        "id": "union",
+                        "params": {},
+                        "type": "Union"
+                      },
+                      {
+                        "children": [
+                          {
+                            "id": "inst",
+                            "params": {},
+                            "target_id": "proto_6759744985845122770",
+                            "type": "Instance"
+                          }
+                        ],
+                        "id": "rz14",
+                        "params": {
+                          "a": 4.88692
+                        },
+                        "type": "RotateZ"
+                      }
+                    ],
+                    "id": "union",
+                    "params": {},
+                    "type": "Union"
+                  },
+                  {
+                    "children": [
+                      {
+                        "id": "inst",
+                        "params": {},
+                        "target_id": "proto_6759744985845122770",
+                        "type": "Instance"
+                      }
+                    ],
+                    "id": "rz15",
+                    "params": {
+                      "a": 5.23599
+                    },
+                    "type": "RotateZ"
+                  }
+                ],
+                "id": "union",
+                "params": {},
+                "type": "Union"
+              },
+              {
+                "children": [
+                  {
+                    "id": "inst",
+                    "params": {},
+                    "target_id": "proto_6759744985845122770",
+                    "type": "Instance"
+                  }
+                ],
+                "id": "rz16",
+                "params": {
+                  "a": 5.58505
+                },
+                "type": "RotateZ"
+              }
+            ],
+            "id": "union",
+            "params": {},
+            "type": "Union"
+          },
+          {
+            "children": [
+              {
+                "id": "inst",
+                "params": {},
+                "target_id": "proto_6759744985845122770",
+                "type": "Instance"
+              }
+            ],
+            "id": "rz17",
+            "params": {
+              "a": 5.93412
+            },
+            "type": "RotateZ"
+          }
+        ],
+        "id": "gear",
+        "params": {},
+        "type": "Union"
+      },
+      "id": "gear",
+      "material": {
+        "albedo": [
+          0.8,
+          0.8,
+          0.8
+        ],
+        "albedo2": [
+          0.1,
+          0.1,
+          0.1
+        ],
+        "emission": 0,
+        "metallic": 0,
+        "pattern": "Solid",
+        "pattern_scale": 1,
+        "reflectivity": 0,
+        "roughness": 0.5
+      },
+      "visible": true
+    }
+  ],
+  "version": "4.0"
+}
