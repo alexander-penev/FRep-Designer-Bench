@@ -38,6 +38,12 @@ int main(int argc, char** argv) {
     int R = argc > 2 ? std::atoi(argv[2]) : 512;
     if (R <= 0) R = 512;
 
+    std::string scene_name = path;
+    if (auto sl = scene_name.find_last_of('/'); sl != std::string::npos)
+        scene_name = scene_name.substr(sl + 1);
+    if (auto d = scene_name.rfind(".json"); d != std::string::npos)
+        scene_name = scene_name.substr(0, d);
+
     SceneGraph scene;
     try { scene = io::load_scene(path); }
     catch (const std::exception& e) { std::fprintf(stderr, "load: %s\n", e.what()); return 1; }
@@ -82,6 +88,14 @@ int main(int argc, char** argv) {
         std::printf("%-9s | %10.2f | %10.3f | %10.3f | %9.1f  (warm build %.2f)\n",
                     name, build_ms, run, wall, ns, wb);
         std::fflush(stdout);
+        // Machine-readable copy on stderr, so a driver script can capture the
+        // numbers while the table above stays readable. Columns follow the
+        // suite's CSV: system,backend,scene,metric,size,ms,throughput,...
+        // ms = wall (the per-frame cost a user sees); build and run are the
+        // separated halves the paper reports.
+        std::fprintf(stderr, "frep4,%s,%s,render,%d,%.3f,%.3f,%.2f,%.3f\n",
+                     name, scene_name.c_str(), R, wall,
+                     wall > 0 ? (double)R * R / wall / 1e3 : -1.0, build_ms, run);
     }
     return 0;
 }
