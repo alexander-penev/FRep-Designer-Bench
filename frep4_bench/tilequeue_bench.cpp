@@ -103,11 +103,12 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
             "usage: %s <scene.json>... [--res N] [--tile N] [--frames N]\n"
-            "  Heterogeneous throughput via a shared tile queue (CPU_IR + GPU_GLSL).\n",
+            "  Heterogeneous throughput via a shared tile queue (CPU_IR + GPU_GLSL).\n"
+            "  --rounds N interleaves the three modes N times and takes medians.\n",
             argv[0]);
         return 2;
     }
-    int R = 800, tile_px = 128, frames = 10;
+    int R = 800, tile_px = 128, frames = 10, rounds = 5;
     std::vector<std::string> scenes;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -115,14 +116,16 @@ int main(int argc, char** argv) {
         if      (a == "--res")    R = next(R);
         else if (a == "--tile")   tile_px = next(tile_px);
         else if (a == "--frames") frames = next(frames);
+        else if (a == "--rounds") rounds = next(rounds);
         else scenes.push_back(a);
     }
 
     auto cpu_e = make_cpu_energy_counter();
     auto gpu_e = make_gpu_energy_counter();
 
-    std::printf("tile-queue heterogeneous throughput  %dx%d, %d-px tiles, %d frames/run\n",
-                R, R, tile_px, frames);
+    std::printf("tile-queue heterogeneous throughput  %dx%d, %d-px tiles, "
+                "%d frames/run, %d interleaved rounds (medians)\n",
+                R, R, tile_px, frames, rounds);
     std::printf("energy: cpu=%s gpu=%s\n\n",
                 cpu_e && cpu_e->available() ? cpu_e->domain().c_str() : "n/a",
                 gpu_e && gpu_e->available() ? gpu_e->domain().c_str() : "n/a");
@@ -152,9 +155,23 @@ int main(int argc, char** argv) {
         cpu->render(scene, R, R, full);
         gpu->render(scene, R, R, full);
 
-        Run rc = run_queue({cpu.get()},            scene, R, R, tile_px, frames, cpu_e.get(), nullptr);
-        Run rg = run_queue({gpu.get()},            scene, R, R, tile_px, frames, nullptr, gpu_e.get());
-        Run rh = run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, cpu_e.get(), gpu_e.get());
+        // Interleaved rounds: one sample of every mode per round, medians taken
+        // per mode. Measuring each mode to completion in turn lets GPU clock
+        // and thermal drift bias whichever mode ran in the hot (or cold) block
+        // — which shows up as a combined throughput above the sum of the
+        // separately measured parts. Interleaving spreads the drift evenly.
+        std::vector<Run> vc, vg, vh;
+        for (int r = 0; r < rounds; ++r) {
+            vc.push_back(run_queue({cpu.get()},            scene, R, R, tile_px, frames, cpu_e.get(), nullptr));
+            vg.push_back(run_queue({gpu.get()},            scene, R, R, tile_px, frames, nullptr, gpu_e.get()));
+            vh.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, cpu_e.get(), gpu_e.get()));
+        }
+        auto median_run = [](std::vector<Run> v) {
+            std::sort(v.begin(), v.end(),
+                      [](const Run& a, const Run& b) { return a.mpix_s < b.mpix_s; });
+            return v[v.size() / 2];
+        };
+        Run rc = median_run(vc), rg = median_run(vg), rh = median_run(vh);
 
         double sum = rc.mpix_s + rg.mpix_s;
         double eff = sum > 0 ? 100.0 * rh.mpix_s / sum : 0;
