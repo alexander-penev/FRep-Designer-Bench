@@ -94,14 +94,44 @@ do_grid() {
     echo "-> $f"
 }
 
+# ── Cross-system energy on one identical workload ───────────────────────────
+# The energy axis is only meaningful across systems if the systems do the same
+# work. The 193^3 grid is the one workload all three scalar evaluators perform
+# (mpr is a GPU interval renderer and exposes no scalar evaluation), and the
+# three agree on the field to ~1e-7, so the joules differ only in how each
+# evaluates it. Energy is whole-package CPU (RAPL) plus GPU (NVML) over the run
+# -- energy to complete the task, which is what a user pays.
+do_energy() {
+    need frep4_energy_wrap
+    W="$BIN/frep4_energy_wrap"
+    f="$OUT/energy_xsys.csv"; provenance "$f"; echo "$HDR" >> "$f"
+
+    LB=libfive_bench/build/bench_libfive
+    HF=hyperfun_bench/build/bench_hf
+    if [ -x "$LB" ]; then
+        export LD_LIBRARY_PATH="${LIBFIVE_ROOT:-$(pwd)/libfive}/build/libfive/src:$LD_LIBRARY_PATH"
+        "$W" libfive cpu-array grid193 193 -- "$LB" --grid 193 >>"$f" 2>/dev/null
+    else echo "skip libfive (not built)" >&2; fi
+
+    if [ -x "$HF" ]; then
+        set -- ; for s in $SCENES; do [ -f "scenes/hyperfun/$s.hf" ] && set -- "$@" "scenes/hyperfun/$s.hf"; done
+        [ $# -gt 0 ] && "$W" hyperfun interpreter grid193 193 -- "$HF" 193 "$@" >>"$f" 2>/dev/null
+    else echo "skip hyperfun (not built)" >&2; fi
+
+    set -- ; for s in $SCENES; do set -- "$@" "scenes/frep4/$s.json"; done
+    "$W" frep4 cpu_ir grid193 193 -- "$BIN/frep4_bench_grid" 193 "$@" >>"$f" 2>/dev/null
+    echo "-> $f"
+}
+
 case "${1:-all}" in
     render)     do_render ;;
     resolution) do_resolution ;;
     hetero)     do_hetero ;;
     rtx)        do_rtx ;;
     grid)       do_grid ;;
-    all)        do_render; do_resolution; do_hetero; do_rtx; do_grid ;;
-    *) echo "usage: $0 [all|render|resolution|hetero|rtx|grid]" >&2; exit 2 ;;
+    energy)     do_energy ;;
+    all)        do_render; do_resolution; do_hetero; do_rtx; do_grid; do_energy ;;
+    *) echo "usage: $0 [all|render|resolution|hetero|rtx|grid|energy]" >&2; exit 2 ;;
 esac
 
 echo "done — CSVs in $OUT/ (see $OUT/README.md for the table mapping)"
