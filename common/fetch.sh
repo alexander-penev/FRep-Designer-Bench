@@ -31,7 +31,24 @@ resolve_root() { # VAR name  (dir = $SUITE_DIR/name)
     if is_empty "$d"; then
         echo "== $2: fetching into $d" >&2
         fetch_$2 "$d"
+    elif [ -d "$d/.git" ]; then
+        # A checkout we fetched earlier: bring it to the tip of its branch so a
+        # rerun measures current upstream rather than whatever was cloned months
+        # ago. Failure is not fatal -- no network, a dirty tree or a detached
+        # HEAD all just mean we benchmark what is on disk, which is still a
+        # valid run; the pull is a convenience, not a precondition.
+        # Set <SYS>_NO_PULL=1 to pin a checkout deliberately.
+        eval nopull=\$$(echo "$2" | tr a-z A-Z)_NO_PULL
+        if [ -n "$nopull" ]; then
+            echo "== $2: pull skipped (pinned)" >&2
+        elif git -C "$d" pull --ff-only >/dev/null 2>&1; then
+            echo "== $2: updated to $(git -C "$d" rev-parse --short HEAD 2>/dev/null)" >&2
+        else
+            echo "== $2: pull skipped (offline, pinned, or local changes)" >&2
+        fi
     fi
+    # Not empty and not a git checkout: whatever is in the directory is what
+    # gets built, unchanged.
     echo "$d"
 }
 
