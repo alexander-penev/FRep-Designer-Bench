@@ -123,6 +123,22 @@ do_energy() {
     echo "-> $f"
 }
 
+# ── Energy per render path (the CPU/GPU split of the energy axis) ───────────
+# Both counters over a fixed-duration window per path: NVML integrates power on
+# a ~10-100 ms cadence, so a few millisecond-scale frames sample nothing. CPU
+# and GPU are reported separately because the package draws ~80 W on this host
+# whatever the GPU is doing, so a single total would price a GPU path by how
+# long the CPU waited for it.
+do_pathenergy() {
+    need frep4_pathcost
+    f="$OUT/energy_paths.csv"; provenance "$f"
+    echo "$HDR,gpu_j_per_frame,cpu_j_per_frame,build_ms,run_ms" >> "$f"
+    for s in $SCENES; do
+        "$BIN/frep4_pathcost" "scenes/frep4/$s.json" 512 --energy 6 2>>"$f" >/dev/null
+    done
+    echo "-> $f"
+}
+
 case "${1:-all}" in
     render)     do_render ;;
     resolution) do_resolution ;;
@@ -130,8 +146,9 @@ case "${1:-all}" in
     rtx)        do_rtx ;;
     grid)       do_grid ;;
     energy)     do_energy ;;
-    all)        do_render; do_resolution; do_hetero; do_rtx; do_grid; do_energy ;;
-    *) echo "usage: $0 [all|render|resolution|hetero|rtx|grid|energy]" >&2; exit 2 ;;
+    pathenergy) do_pathenergy ;;
+    all)        do_render; do_resolution; do_hetero; do_rtx; do_grid; do_energy; do_pathenergy ;;
+    *) echo "usage: $0 [all|render|resolution|hetero|rtx|grid|energy|pathenergy]" >&2; exit 2 ;;
 esac
 
 echo "done — CSVs in $OUT/ (see $OUT/README.md for the table mapping)"
