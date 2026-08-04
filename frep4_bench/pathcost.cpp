@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace frep;
@@ -60,6 +61,30 @@ int main(int argc, char** argv) {
 
     auto cpu_e = make_cpu_energy_counter();
     auto gpu_e = make_gpu_energy_counter();
+
+    // Idle baseline. Both counters measure the whole device, and neither device
+    // is off while the other works: this GPU draws ~18 W and this CPU package
+    // ~80 W doing nothing. Reporting raw counter deltas therefore credits a
+    // CPU-only render with "GPU energy" that is merely the idle draw of a card
+    // sitting there. Measure that floor once and subtract it, so the figures are
+    // the marginal cost of rendering rather than the cost of owning the machine.
+    double idle_cpu_w = 0, idle_gpu_w = 0;
+    if (energy_s > 0) {
+        const double t_idle = 3.0;
+        if (cpu_e && cpu_e->available()) cpu_e->begin();
+        if (gpu_e && gpu_e->available()) gpu_e->begin();
+        auto i0 = std::chrono::steady_clock::now();
+        while (std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - i0).count() < t_idle) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        double el = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - i0).count();
+        if (cpu_e && cpu_e->available()) { if (auto v = cpu_e->end()) idle_cpu_w = *v / el; }
+        if (gpu_e && gpu_e->available()) { if (auto v = gpu_e->end()) idle_gpu_w = *v / el; }
+        std::printf("idle baseline: cpu %.1f W, gpu %.1f W (subtracted below)\n",
+                    idle_cpu_w, idle_gpu_w);
+    }
 
     const PathKind paths[] = { PathKind::CpuIr, PathKind::GpuGlsl,
                                PathKind::GpuIr, PathKind::GpuRtx };
@@ -115,8 +140,14 @@ int main(int argc, char** argv) {
                 exec->render(scene, R, R, full);
                 frames += 1;
             }
-            if (cpu_e && cpu_e->available()) { if (auto v = cpu_e->end()) j_cpu = *v; }
-            if (gpu_e && gpu_e->available()) { if (auto v = gpu_e->end()) j_gpu = *v; }
+            double el = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - e0).count();
+            if (cpu_e && cpu_e->available())
+                { if (auto v = cpu_e->end()) j_cpu = *v - idle_cpu_w * el; }
+            if (gpu_e && gpu_e->available())
+                { if (auto v = gpu_e->end()) j_gpu = *v - idle_gpu_w * el; }
+            if (j_cpu < 0) j_cpu = 0;   // below the noise floor of the baseline
+            if (j_gpu < 0) j_gpu = 0;
         }
         if (frames <= 0) frames = 1;
         double run = med(run_ms), wall = med(wall_ms), wb = med(warmbuild_ms);
