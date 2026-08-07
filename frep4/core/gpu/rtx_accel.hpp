@@ -28,10 +28,22 @@ using VkAccelerationStructureKHR = VkAccelerationStructureKHR_T*;
 
 namespace frep::gpu {
 
-// One axis-aligned box fed to the BLAS (min/max corners in world space).
+// One axis-aligned box fed to the BLAS (min/max corners in world space, or in
+// the prototype's object space when the instance carries a transform).
 struct RtAabb {
     float min[3];
     float max[3];
+};
+
+// One TLAS placement: which BLAS to reference and where to put it. `m` is the
+// object->world affine map in VkTransformMatrixKHR's row-major 3x4 layout
+// ([R|t] per row), so the traversal unit transforms the ray into the
+// prototype's object space before handing it to the intersection shader. The
+// BLAS index doubles as the SBT hit-record offset, so all placements of one
+// prototype run the same intersection shader.
+struct RtInstanceXform {
+    std::uint32_t blas = 0;
+    float m[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};
 };
 
 // Owns the BLAS + TLAS and their backing buffers. Built once per scene; the
@@ -62,6 +74,19 @@ public:
     // ray misses. The single-instance build() above is the n=1 special case.
     static std::expected<RtAccel, std::string>
     build_groups(const RtxCtx& ctx, const std::vector<RtAabb>& group_boxes);
+
+    // Build one BLAS per *prototype* box and a TLAS whose instances place those
+    // prototypes with arbitrary affine transforms. This is build_groups
+    // generalised: there, boxes and instances are in bijection and every
+    // transform is the identity; here many placements may share one BLAS (and
+    // therefore one intersection shader and one SBT record), so a scene of a
+    // thousand copies of one shape costs one shader instead of a thousand.
+    //
+    // `proto_boxes[i]` is prototype i's bounds in *its own object space*, and
+    // `placements[j].m` maps that space to world.
+    static std::expected<RtAccel, std::string>
+    build_instanced(const RtxCtx& ctx, const std::vector<RtAabb>& proto_boxes,
+                    const std::vector<RtInstanceXform>& placements);
 
     // Number of TLAS instances (= groups for build_groups, 1 otherwise).
     std::uint32_t instance_count() const { return inst_count_; }

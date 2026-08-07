@@ -376,8 +376,27 @@ RtAccel::build(const RtxCtx& ctx, const std::vector<RtAabb>& boxes) {
 
 std::expected<RtAccel, std::string>
 RtAccel::build_groups(const RtxCtx& ctx, const std::vector<RtAabb>& group_boxes) {
-    if (group_boxes.empty())
-        return std::unexpected("rtx_accel: build_groups needs >=1 box");
+    // The group build is the instanced build with no sharing: one placement per
+    // box, each at the identity, so BLAS i is reached only by instance i and
+    // gets SBT record i. Keeping one implementation means the two paths cannot
+    // drift apart in how they lay out the TLAS.
+    std::vector<RtInstanceXform> ident(group_boxes.size());
+    for (std::size_t i = 0; i < group_boxes.size(); ++i)
+        ident[i].blas = (std::uint32_t)i;
+    return build_instanced(ctx, group_boxes, ident);
+}
+
+std::expected<RtAccel, std::string>
+RtAccel::build_instanced(const RtxCtx& ctx, const std::vector<RtAabb>& proto_boxes,
+                         const std::vector<RtInstanceXform>& placements) {
+    if (proto_boxes.empty())
+        return std::unexpected("rtx_accel: build_instanced needs >=1 box");
+    if (placements.empty())
+        return std::unexpected("rtx_accel: build_instanced needs >=1 placement");
+    for (const auto& p : placements)
+        if (p.blas >= proto_boxes.size())
+            return std::unexpected("rtx_accel: placement references a "
+                                   "nonexistent prototype BLAS");
 
     auto dev = ctx.device();
     auto get_sizes = api_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
@@ -391,18 +410,19 @@ RtAccel::build_groups(const RtxCtx& ctx, const std::vector<RtAabb>& group_boxes)
 
     RtAccel a;
     a.ctx_ = &ctx;
-    const std::uint32_t n = (std::uint32_t)group_boxes.size();
-    a.inst_count_ = n;
+    const std::uint32_t n  = (std::uint32_t)proto_boxes.size();     // BLASes
+    const std::uint32_t ni = (std::uint32_t)placements.size();      // instances
+    a.inst_count_ = ni;
     a.g_aabb_buf_.resize(n, nullptr);  a.g_aabb_mem_.resize(n, nullptr);
     a.g_blas_buf_.resize(n, nullptr);  a.g_blas_mem_.resize(n, nullptr);
     a.g_scratch_buf_.resize(n, nullptr); a.g_scratch_mem_.resize(n, nullptr);
     a.g_blas_.resize(n, nullptr);
 
-    // ── One BLAS per group box ──────────────────────────────────────────────
+    // ── One BLAS per prototype box ──────────────────────────────────────────
     for (std::uint32_t i = 0; i < n; ++i) {
-        VkAabbPositionsKHR aabb{ group_boxes[i].min[0], group_boxes[i].min[1],
-                                 group_boxes[i].min[2], group_boxes[i].max[0],
-                                 group_boxes[i].max[1], group_boxes[i].max[2] };
+        VkAabbPositionsKHR aabb{ proto_boxes[i].min[0], proto_boxes[i].min[1],
+                                 proto_boxes[i].min[2], proto_boxes[i].max[0],
+                                 proto_boxes[i].max[1], proto_boxes[i].max[2] };
         auto up = upload(ctx, &aabb, sizeof(aabb),
                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                          true, a.g_aabb_buf_[i], a.g_aabb_mem_[i]);
@@ -448,7 +468,7 @@ RtAccel::build_groups(const RtxCtx& ctx, const std::vector<RtAabb>& group_boxes)
         ci.size   = sizes.accelerationStructureSize;
         ci.type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
         if (create_as(dev, &ci, nullptr, &a.g_blas_[i]) != VK_SUCCESS)
-            return std::unexpected("rtx_accel: create group BLAS failed");
+            return std::unexpected("rtx_accel: create prototype BLAS failed");
 
         bgi.dstAccelerationStructure  = a.g_blas_[i];
         bgi.scratchData.deviceAddress = buffer_address(ctx, a.g_scratch_buf_[i]);
@@ -461,26 +481,33 @@ RtAccel::build_groups(const RtxCtx& ctx, const std::vector<RtAabb>& group_boxes)
         if (!r) return std::unexpected(r.error());
     }
 
-    // ── TLAS over N instances, instance i → BLAS i, SBT offset i ────────────
+    // ── TLAS: one entry per placement, referencing its prototype's BLAS ─────
     {
-        std::vector<VkAccelerationStructureInstanceKHR> insts(n);
+        // BLAS device addresses, resolved once — a thousand placements of one
+        // prototype would otherwise query the same address a thousand times.
+        std::vector<VkDeviceAddress> baddr(n, 0);
         for (std::uint32_t i = 0; i < n; ++i) {
             VkAccelerationStructureDeviceAddressInfoKHR ai{};
             ai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
             ai.accelerationStructure = a.g_blas_[i];
-            VkDeviceAddress baddr = as_addr(dev, &ai);
+            baddr[i] = as_addr(dev, &ai);
+        }
 
+        std::vector<VkAccelerationStructureInstanceKHR> insts(ni);
+        for (std::uint32_t i = 0; i < ni; ++i) {
+            const RtInstanceXform& px = placements[i];
             auto& inst = insts[i];
             inst = {};
-            inst.transform.matrix[0][0] = 1.0f;
-            inst.transform.matrix[1][1] = 1.0f;
-            inst.transform.matrix[2][2] = 1.0f;
+            // VkTransformMatrixKHR is row-major 3x4 and RtInstanceXform stores
+            // it in exactly that order, so this is a straight copy.
+            std::memcpy(&inst.transform.matrix[0][0], px.m, sizeof(px.m));
             inst.instanceCustomIndex = i;
             inst.mask = 0xFF;
-            // Each group gets its own hit record → its own intersection shader.
-            inst.instanceShaderBindingTableRecordOffset = i;
+            // The hit record is per *prototype*: every placement of a shape
+            // runs that shape's one intersection shader.
+            inst.instanceShaderBindingTableRecordOffset = px.blas;
             inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-            inst.accelerationStructureReference = baddr;
+            inst.accelerationStructureReference = baddr[px.blas];
         }
 
         auto up = upload(ctx, insts.data(),
@@ -508,7 +535,7 @@ RtAccel::build_groups(const RtxCtx& ctx, const std::vector<RtAabb>& group_boxes)
         VkAccelerationStructureBuildSizesInfoKHR sizes{};
         sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
         get_sizes(dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                  &bgi, &n, &sizes);
+                  &bgi, &ni, &sizes);
 
         auto rb = make_buffer(ctx, sizes.accelerationStructureSize,
                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
@@ -530,13 +557,13 @@ RtAccel::build_groups(const RtxCtx& ctx, const std::vector<RtAabb>& group_boxes)
         if (create_as(dev, &ci, nullptr, &a.tlas_) != VK_SUCCESS) {
             vkDestroyBuffer(dev, tscratch, nullptr);
             vkFreeMemory(dev, tscratch_mem, nullptr);
-            return std::unexpected("rtx_accel: create groups TLAS failed");
+            return std::unexpected("rtx_accel: create instanced TLAS failed");
         }
 
         bgi.dstAccelerationStructure  = a.tlas_;
         bgi.scratchData.deviceAddress = buffer_address(ctx, tscratch);
         VkAccelerationStructureBuildRangeInfoKHR range{};
-        range.primitiveCount = n;
+        range.primitiveCount = ni;
         const VkAccelerationStructureBuildRangeInfoKHR* pr = &range;
         auto r = one_shot(ctx, [&](VkCommandBuffer cmd) {
             cmd_build(cmd, 1, &bgi, &pr);

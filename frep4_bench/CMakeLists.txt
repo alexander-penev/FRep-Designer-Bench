@@ -53,6 +53,13 @@ if(FREP4_BENCH_RENDER)
   target_link_libraries(frep4_rq_bench PRIVATE frep_core)
   set_property(TARGET frep4_rq_bench PROPERTY CXX_STANDARD 26)
 
+  # Cross-path parity for a scene *file* (the structured scenes frep4's own
+  # parity_check cannot reach), so the RT instanced build stays verifiable.
+  add_executable(frep4_scene_parity scene_parity.cpp)
+  target_include_directories(frep4_scene_parity PRIVATE ${FREP4_ROOT})
+  target_link_libraries(frep4_scene_parity PRIVATE frep_core)
+  set_property(TARGET frep4_scene_parity PROPERTY CXX_STANDARD 26)
+
   # Separate build from run for every render path (the fair build-vs-run table).
   add_executable(frep4_pathcost pathcost.cpp)
   target_include_directories(frep4_pathcost PRIVATE ${FREP4_ROOT})

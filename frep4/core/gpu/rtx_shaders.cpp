@@ -81,19 +81,53 @@ std::string lift_push_block(const std::string& comp_src, std::string& error) {
 }
 
 // Emit an intersection shader that sphere-traces `shared`'s scene_sdf_v exactly
-// like the compute path. Used for both the single-BLAS path and each per-group
-// per-group shader (where `shared` is the group's own sub-tree SDF).
+// like the compute path. Used for the single-BLAS path, for each per-group
+// shader (where `shared` is the group's own sub-tree SDF), and — with
+// `object_space` set — for each prototype on the instanced path.
+//
+// Object-space mode. On the instanced path the BLAS holds the prototype's own
+// bounds and the TLAS instance carries the placement, so the traversal unit has
+// already transformed the ray by the time this shader runs: gl_ObjectRay*
+// is the world ray expressed in the prototype's coordinates. Marching there
+// instead of in world space is what lets every placement of a shape share one
+// shader, since the shader no longer knows or cares where the copy stands.
+//
+// Two conversions make that exact rather than approximate:
+//
+//   * gl_ObjectRayDirectionEXT is NOT renormalised — it is the world direction
+//     pushed through world->object, so its length is the object units per world
+//     unit along the ray. That is deliberate in the specification: it makes the
+//     ray parameter t identical in both spaces, so the t we report is the world
+//     t the hardware expects, with no rescaling.
+//   * distances, however, do differ by that factor. An object-space step of `d`
+//     advances t by d/|objDir|, and the world-space hit epsilon corresponds to
+//     an object-space epsilon of eps*|objDir|. Both fall out of the same scalar.
+//
+// For a rigid placement (translation and rotation, the common case) the factor
+// is exactly one and the arithmetic reduces to the world-space form.
 inline std::string emit_intersection(const char* hdr, const std::string& push,
                                      const std::string& shared,
-                                     const TracerConfig& cfg) {
+                                     const TracerConfig& cfg,
+                                     bool object_space = false) {
     std::ostringstream s;
     s << hdr << push << shared
       << "hitAttributeEXT vec3 hit_pos;\n"
-      << "void main() {\n"
-      << "    vec3 ro = gl_WorldRayOriginEXT;\n"
-      << "    vec3 rd = gl_WorldRayDirectionEXT;\n"
-      << "    float t = max(gl_RayTminEXT, 0.001);\n"
-      << "    float tmax = min(gl_RayTmaxEXT, " << cfg.max_dist << ");\n";
+      << "void main() {\n";
+    if (object_space) {
+        s << "    vec3 ro = gl_ObjectRayOriginEXT;\n"
+          << "    vec3 rd = gl_ObjectRayDirectionEXT;   // unnormalised: |rd| = object units per world unit\n"
+          << "    float sc = length(rd);\n"
+          << "    if (sc < 1e-20) return;               // degenerate placement\n"
+          << "    float dt_per_d = 1.0 / sc;            // object distance -> ray parameter\n";
+    } else {
+        s << "    vec3 ro = gl_WorldRayOriginEXT;\n"
+          << "    vec3 rd = gl_WorldRayDirectionEXT;\n"
+          << "    const float sc = 1.0, dt_per_d = 1.0;\n";
+    }
+    s << "    float t = max(gl_RayTminEXT, 0.001);\n"
+      << "    float tmax = min(gl_RayTmaxEXT, " << cfg.max_dist << ");\n"
+      // Distance thresholds live in the space we march in.
+      << "    float eps = " << cfg.epsilon << " * sc;\n";
     // Interval pre-skip (the RTX analog of the compute path's tile cull): bound
     // the field over the AABB of this ray's [t,tmax] segment; if the interval
     // doesn't straddle 0 the surface can't be in this segment, so skip the whole
@@ -123,13 +157,21 @@ inline std::string emit_intersection(const char* hdr, const std::string& push,
       << "        bool sor_fail = (omega > 1.0) && ((radius + last_d) < step_len);\n"
       << "        step_len = sor_fail ? (step_len * (1.0 - omega)) : (radius * omega);\n"
       << "        omega = sor_fail ? 1.0 : omega;\n"
-      << "        if (d < " << cfg.epsilon << " && !sor_fail) { hit = true; last_d = d; break; }\n"
+      << "        if (d < eps && !sor_fail) { hit = true; last_d = d; break; }\n"
       << "        last_d = d;\n"
-      << "        t += step_len;\n"
+      << "        t += step_len * dt_per_d;\n"
       << "    }\n"
-      << "    if (!hit && t <= tmax && last_d < " << (cfg.epsilon * 80.0f)
-      <<       ") hit = true;\n"
-      << "    if (hit) { hit_pos = p; reportIntersectionEXT(t, 0u); }\n"
+      << "    if (!hit && t <= tmax && last_d < eps * 80.0) hit = true;\n"
+      // The closest-hit shader shades against the FULL scene in world space, so
+      // the attribute it reads has to be a world point even when the march ran
+      // in object space. t is the same parameter in both, so the world point is
+      // just the world ray evaluated at it.
+      << "    if (hit) {\n"
+      << "        hit_pos = " << (object_space
+             ? "gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * t"
+             : "p") << ";\n"
+      << "        reportIntersectionEXT(t, 0u);\n"
+      << "    }\n"
       << "}\n";
     return s.str();
 }
@@ -271,10 +313,12 @@ emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg) {
     return set;
 }
 
-std::expected<RtGroupShaderSet, std::string>
-emit_rt_group_shaders(const SceneGraph& full_scene,
-                      const std::vector<SceneGraph>& group_scenes,
-                      const TracerConfig& cfg) {
+// Shared body of the group and instanced emitters: the two differ only in
+// whether each intersection shader marches in world or in object space.
+static std::expected<RtGroupShaderSet, std::string>
+emit_rt_per_group(const SceneGraph& full_scene,
+                  const std::vector<SceneGraph>& group_scenes,
+                  const TracerConfig& cfg, bool object_space) {
     if (group_scenes.empty())
         return std::unexpected("rtx_shaders: no groups to emit");
 
@@ -321,9 +365,24 @@ emit_rt_group_shaders(const SceneGraph& full_scene,
         if (!err.empty()) return std::unexpected(err);
         // push block is identical across groups (same camera/lights), so reuse
         // the full scene's; the group only changes scene_sdf.
-        out.rint_per_group.push_back(emit_intersection(hdr, push, gshared, cfg));
+        out.rint_per_group.push_back(
+            emit_intersection(hdr, push, gshared, cfg, object_space));
     }
     return out;
+}
+
+std::expected<RtGroupShaderSet, std::string>
+emit_rt_group_shaders(const SceneGraph& full_scene,
+                      const std::vector<SceneGraph>& group_scenes,
+                      const TracerConfig& cfg) {
+    return emit_rt_per_group(full_scene, group_scenes, cfg, /*object_space=*/false);
+}
+
+std::expected<RtGroupShaderSet, std::string>
+emit_rt_instanced_shaders(const SceneGraph& full_scene,
+                          const std::vector<SceneGraph>& proto_scenes,
+                          const TracerConfig& cfg) {
+    return emit_rt_per_group(full_scene, proto_scenes, cfg, /*object_space=*/true);
 }
 
 }  // namespace frep::gpu

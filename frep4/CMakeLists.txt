@@ -290,6 +290,7 @@ if(FREP_BUILD_GPU)
         core/gpu/rtx_shaders.cpp
         core/gpu/rtx_pipeline.cpp
         core/gpu/rtx_csg_groups.cpp
+        core/gpu/rtx_instances.cpp
         core/gpu/rtx_query.cpp
     )
     target_link_libraries(frep_core PUBLIC Vulkan::Vulkan)

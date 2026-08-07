@@ -21,6 +21,8 @@
 #include "core/gpu/rtx_shaders.hpp"
 #include "core/gpu/rtx_pipeline.hpp"
 #include "core/gpu/rtx_csg_groups.hpp"
+#include "core/gpu/rtx_instances.hpp"
+#include "core/frep/smart_import.hpp"
 #include "core/gpu/glsl_compile.hpp"
 #include "core/gpu/shader_push_builder.hpp"
 #include "core/compiler/codegen.hpp"
@@ -55,8 +57,14 @@ std::vector<std::uint32_t> compile_stage(const std::string& src, const char* sta
     return out;
 }
 
+// The first *visible* object's geometry. Visibility is not cosmetic here:
+// factor_instances adds each shared prototype to the scene as a hidden
+// definition, and taking the map's first entry would hand back that lone
+// prototype instead of the grid — partitioning to one group and quietly
+// benchmarking a single sphere. Match what the executors do.
 FRepNode::Ptr scene_root(const SceneGraph& s) {
-    for (auto& [id, o] : s.objects()) return o.geometry;
+    for (auto& [id, o] : s.objects())
+        if (o.visible && o.geometry) return o.geometry;
     return nullptr;
 }
 
@@ -70,6 +78,8 @@ gpu::RtAabb to_aabb(const FRepNode::AABB& b, float m = 0.05f) {
 int main(int argc, char** argv) {
     int W = 256, H = 256;
     bool energy = false;
+    bool factor = false;
+    bool verbose = false;
     std::vector<int> counts = {1, 4, 16, 64};
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -81,13 +91,18 @@ int main(int argc, char** argv) {
                 "  --height N        frame height (default 256)\n"
                 "  --counts A,B,...  CSG group counts to sweep (default 1,4,16,64)\n"
                 "  --energy          measure CPU (RAPL) + GPU (NVML) energy, "
-                "report Mpix/kWh\n",
+                "report Mpix/kWh\n"
+                "  --factor          run factor_instances on the grid first, so\n"
+                "                    the shared stages emit one subprogram per\n"
+                "                    shape instead of one inlined copy per object\n",
                 argv[0]);
             return 0;
         }
         else if (a == "--width") W = next(W);
         else if (a == "--height") H = next(H);
         else if (a == "--energy") energy = true;
+        else if (a == "--factor") factor = true;
+        else if (a == "--verbose") verbose = true;
         else if (a == "--counts") {
             counts.clear();
             std::string s = argv[++i]; size_t p = 0;
@@ -128,15 +143,22 @@ int main(int argc, char** argv) {
     // devices ADD — running both concurrently gives cpu + rtx, which scaling a
     // single path can't reach (you can't turn 12 CPU cores into 512). Energy
     // (pix/kWh) and cost (pix/$) are separate axes for separate questions.
+    // "shaders" is the number of distinct intersection shaders the RT pipeline
+    // has to hold — the count instancing collapses. "build ms" is the one-off
+    // pipeline + SBT construction that scales with it; it is amortized over
+    // frames and excluded from the throughput columns, but it is the reason the
+    // per-group build ran out of road at a thousand objects.
     if (energy)
-        std::printf("  %5s  %7s  %12s  %12s  %12s  %14s  %14s\n",
-                    "N", "groups", "cpu Mpix/s", "rtx Mpix/s", "sum Mpix/s",
+        std::printf("  %5s  %7s  %8s  %9s  %12s  %12s  %12s  %14s  %14s\n",
+                    "N", "groups", "shaders", "build ms",
+                    "cpu Mpix/s", "rtx Mpix/s", "sum Mpix/s",
                     "cpu Mpix/kWh", "rtx Mpix/kWh");
     else
-        std::printf("  %5s  %7s  %12s  %12s  %12s\n",
-                    "N", "groups", "cpu Mpix/s", "rtx Mpix/s", "sum Mpix/s");
-    std::printf("  --------------------------------------------------------------"
-                "%s\n", energy ? "--------------------------------" : "");
+        std::printf("  %5s  %7s  %8s  %9s  %12s  %12s  %12s\n",
+                    "N", "groups", "shaders", "build ms",
+                    "cpu Mpix/s", "rtx Mpix/s", "sum Mpix/s");
+    std::printf("  ----------------------------------------------------------------"
+                "----------------%s\n", energy ? "--------------------------------" : "");
 
     const double mpix = (double)W * H / 1e6;
 
@@ -145,6 +167,15 @@ int main(int argc, char** argv) {
 
     for (int n : counts) {
         SceneGraph scene = bench::make_sphere_grid(n);
+        // The grid is built flat — N independent Translate(Sphere) members with
+        // no recorded sharing — which is how an imported model usually arrives.
+        // --factor runs the structure-recovery pass first, rewiring the copies
+        // to one prototype through InstanceNodes. That is what lets the *shared*
+        // stages shrink too: the emitters turn an InstanceNode into a call to
+        // one subprogram instead of another inlined copy of the body, so the
+        // closest-hit shader (which evaluates the whole scene for normals,
+        // albedo and shadows) stops growing a sphere at a time.
+        if (factor) frep::factor_instances(scene);
         auto root = scene_root(scene);
         auto groups = gpu::partition_csg_groups(root);
 
@@ -160,17 +191,40 @@ int main(int argc, char** argv) {
 
         // RT multi-BLAS path.
         double rtx_trace_ms = -1.0;
+        double rtx_build_ms = -1.0;   // cold pipeline + SBT (amortized after)
+        int    n_shaders = 0;         // intersection shaders the pipeline needs
         double gpu_j = -1.0;
         std::string err;
         do {
             auto ctx = gpu::RtxCtx::create();
             if (!ctx) { err = ctx.error(); break; }
 
-            // Per-group scenes + shaders.
+            // Prefer the instanced build: the grid is N copies of one sphere,
+            // so one prototype BLAS + N transformed TLAS instances replaces N
+            // BLASes and, more to the point, N intersection shaders. Without it
+            // the pipeline build is O(N) and swamps the trace it is meant to
+            // measure. FREP_RTX_NO_INSTANCING=1 pins the old per-group build so
+            // the two constructions can be compared on the same scene.
+            const bool no_inst = [] {
+                const char* v = std::getenv("FREP_RTX_NO_INSTANCING");
+                return v && v[0] == '1';
+            }();
+            auto inst = no_inst ? std::nullopt : gpu::factor_rt_instances(root);
+
+            // Scenes to emit an intersection shader from: one per prototype on
+            // the instanced path, one per group otherwise.
             std::vector<SceneGraph> gscenes;
-            for (auto& g : groups) { SceneGraph s; s.add_object(g.root); gscenes.push_back(std::move(s)); }
-            auto sh = gpu::emit_rt_group_shaders(scene, gscenes, cfg);
+            if (inst) {
+                gscenes = gpu::make_proto_scenes(scene, *inst);
+            } else {
+                for (auto& g : groups) {
+                    SceneGraph s; s.add_object(g.root); gscenes.push_back(std::move(s));
+                }
+            }
+            auto sh = inst ? gpu::emit_rt_instanced_shaders(scene, gscenes, cfg)
+                           : gpu::emit_rt_group_shaders(scene, gscenes, cfg);
             if (!sh) { err = sh.error(); break; }
+            n_shaders = (int)gscenes.size();
 
             auto rgen  = compile_stage(sh->rgen,  "rgen",  err); if (!err.empty()) break;
             auto rchit = compile_stage(sh->rchit, "rchit", err); if (!err.empty()) break;
@@ -181,11 +235,31 @@ int main(int argc, char** argv) {
                 if (!err.empty()) break;
             }
             if (!err.empty()) break;
+            // SPIR-V sizes, because "the build is slow" is not a diagnosis. The
+            // driver compiles every module to machine code, so the cost tracks
+            // module size — and only measuring says whether the weight sits in
+            // the per-shape intersection shaders or in the shared closest-hit
+            // stage, which still evaluates the WHOLE scene for the normal, the
+            // albedo and the shadow ray.
+            if (verbose) {
+                std::size_t rint_words = 0;
+                for (auto& r : rints) rint_words += r.size();
+                std::fprintf(stderr,
+                    "  [n=%d] spirv words: rgen %zu  rchit %zu  rmiss %zu  "
+                    "rint x%zu = %zu\n", n, rgen.size(), rchit.size(),
+                    rmiss.size(), rints.size(), rint_words);
+            }
 
-            // Per-group AABBs → multi-BLAS.
+            // Boxes → multi-BLAS. On the instanced path they are the
+            // prototypes' object-space bounds and the placement matrices put
+            // the copies in the world; otherwise they are the groups' own
+            // world-space bounds at the identity.
             std::vector<gpu::RtAabb> boxes;
-            for (auto& g : groups) boxes.push_back(to_aabb(g.box));
-            auto accel = gpu::RtAccel::build_groups(*ctx, boxes);
+            if (inst) for (auto& p : inst->protos) boxes.push_back(to_aabb(p.box));
+            else      for (auto& g : groups)       boxes.push_back(to_aabb(g.box));
+            auto accel = inst
+                ? gpu::RtAccel::build_instanced(*ctx, boxes, inst->placements)
+                : gpu::RtAccel::build_groups(*ctx, boxes);
             if (!accel) { err = accel.error(); break; }
 
             gpu::ShaderPush sp = gpu::build_push_from_scene(scene, W, H);
@@ -207,6 +281,7 @@ int main(int argc, char** argv) {
                 auto wi = gpu::rtx_trace_groups_cached(*ctx, *accel, pcache,
                                                        rgen, rints, rchit, rmiss, pc, W, H);
                 if (!wi) { err = wi.error(); break; }
+                if (w == 0) rtx_build_ms = wi->pipeline_ms;   // the cold build
             }
             if (!err.empty()) { pcache.release(*ctx); break; }
 
@@ -249,12 +324,13 @@ int main(int argc, char** argv) {
                 if (gpu_j > 0)
                     std::snprintf(rtx_ek, sizeof(rtx_ek), "%.1f",
                                   power::pixels_per_kwh(px, gpu_j) / 1e6);
-                std::printf("  %5d  %7zu  %12.1f  %12.1f  %12.1f  %14s  %14s\n",
-                            n, groups.size(), cpu_tp, rtx_tp, cpu_tp + rtx_tp,
-                            cpu_ek, rtx_ek);
+                std::printf("  %5d  %7zu  %8d  %9.1f  %12.1f  %12.1f  %12.1f  %14s  %14s\n",
+                            n, groups.size(), n_shaders, rtx_build_ms,
+                            cpu_tp, rtx_tp, cpu_tp + rtx_tp, cpu_ek, rtx_ek);
             } else {
-                std::printf("  %5d  %7zu  %12.1f  %12.1f  %12.1f\n",
-                            n, groups.size(), cpu_tp, rtx_tp, cpu_tp + rtx_tp);
+                std::printf("  %5d  %7zu  %8d  %9.1f  %12.1f  %12.1f  %12.1f\n",
+                            n, groups.size(), n_shaders, rtx_build_ms,
+                            cpu_tp, rtx_tp, cpu_tp + rtx_tp);
             }
         }
     }

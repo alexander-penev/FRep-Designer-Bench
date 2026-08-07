@@ -27,6 +27,7 @@
 #include "core/gpu/rtx_accel.hpp"
 #include "core/gpu/rtx_shaders.hpp"
 #include "core/gpu/rtx_csg_groups.hpp"
+#include "core/gpu/rtx_instances.hpp"
 #include "core/gpu/rtx_pipeline.hpp"
 #include "core/gpu/glsl_compile.hpp"
 #include "core/frep/operations.hpp"
@@ -114,6 +115,7 @@ public:
             rgen_.clear(); rint_.clear(); rchit_.clear(); rmiss_.clear();
             rints_group_.clear();
             group_mode_ = false;
+            inst_protos_ = inst_places_ = 0;
 
             // Partition the scene at hard unions into CSG-independent groups.
             // With >1 group we build a multi-BLAS TLAS so the RT cores do real
@@ -128,7 +130,57 @@ public:
             auto groups = root ? gpu::partition_csg_groups(root)
                                : std::vector<gpu::CsgGroup>{};
 
-            if (groups.size() > 1) {
+            // Instanced build first. When the members repeat a shape — the
+            // colonnade's columns, the gear's teeth, a field of copies — one
+            // BLAS, one intersection shader and one SBT record serve all the
+            // copies, and only the TLAS instance array grows with the count.
+            // Falls through to the per-group build below when nothing repeats
+            // (or when FREP_RTX_NO_INSTANCING pins the old path for an A/B).
+            const bool no_inst = [] {
+                const char* v = std::getenv("FREP_RTX_NO_INSTANCING");
+                return v && v[0] == '1';
+            }();
+            if (!no_inst && groups.size() > 1) {
+                if (auto inst = gpu::factor_rt_instances(root)) {
+                    auto pscenes = gpu::make_proto_scenes(scene, *inst);
+                    auto gs = gpu::emit_rt_instanced_shaders(scene, pscenes, cfg_);
+                    if (gs) {
+                        std::string err = compile(gs->rgen, "rgen", rgen_);
+                        if (err.empty()) err = compile(gs->rchit, "rchit", rchit_);
+                        if (err.empty()) err = compile(gs->rmiss, "rmiss", rmiss_);
+                        rints_group_.resize(gs->rint_per_group.size());
+                        for (std::size_t i = 0; err.empty() && i < rints_group_.size(); ++i)
+                            err = compile(gs->rint_per_group[i], "rint", rints_group_[i]);
+                        if (err.empty()) {
+                            // Boxes are the prototypes' OWN bounds; the margin is
+                            // object-space too, and the instance transform carries
+                            // both into world space.
+                            std::vector<gpu::RtAabb> boxes;
+                            const float m = 0.05f;
+                            for (auto& p : inst->protos)
+                                boxes.push_back(gpu::RtAabb{
+                                    {p.box.min_x - m, p.box.min_y - m, p.box.min_z - m},
+                                    {p.box.max_x + m, p.box.max_y + m, p.box.max_z + m}});
+                            auto accel = gpu::RtAccel::build_instanced(
+                                *ctx_, boxes, inst->placements);
+                            if (accel) {
+                                accel_ = std::make_unique<gpu::RtAccel>(std::move(*accel));
+                                tex_pixels_.clear(); mesh_voxels_.clear();
+                                group_mode_ = true;
+                                inst_protos_ = (int)inst->protos.size();
+                                inst_places_ = (int)inst->placements.size();
+                            }
+                        }
+                    }
+                    if (!group_mode_) {   // instanced build failed → try groups
+                        rgen_.clear(); rchit_.clear(); rmiss_.clear();
+                        rints_group_.clear();
+                        inst_protos_ = inst_places_ = 0;
+                    }
+                }
+            }
+
+            if (!group_mode_ && groups.size() > 1) {
                 std::vector<SceneGraph> gscenes;
                 for (auto& g : groups) {
                     SceneGraph s;
@@ -235,11 +287,18 @@ public:
             auto d = [](pclk::time_point a, pclk::time_point b) {
                 return std::chrono::duration<double, std::milli>(b - a).count();
             };
+            char mode[48];
+            if (inst_places_)
+                std::snprintf(mode, sizeof(mode), "instanced %d proto/%d inst",
+                              inst_protos_, inst_places_);
+            else
+                std::snprintf(mode, sizeof(mode), "%s",
+                              group_mode_ ? "groups" : "single");
             std::fprintf(stderr,
                 "[rtx-prof %s] wall=%.2f  rebuild=%.2f  trace_call=%.2f  crop=%.2f"
                 "   | inside trace: setup(pipeline_ms)=%.2f trace(trace_ms)=%.2f "
                 "readback=%.2f\n",
-                group_mode_ ? "groups" : "single",
+                mode,
                 d(pt0, pt_crop), d(pt0, pt_rebuild), d(pt_rebuild, pt_trace),
                 d(pt_trace, pt_crop),
                 img->pipeline_ms, img->trace_ms, img->readback_ms);
@@ -295,6 +354,9 @@ private:
     std::vector<std::uint32_t>     rgen_, rint_, rchit_, rmiss_;
     std::vector<std::vector<std::uint32_t>> rints_group_;  // per-group rint SPIR-V
     bool                           group_mode_ = false;    // multi-BLAS this scene
+    // Non-zero when the multi-BLAS build came from shared prototypes rather
+    // than one-BLAS-per-member; the ratio is what the instancing bought.
+    int                            inst_protos_ = 0, inst_places_ = 0;
     std::vector<std::uint32_t>     tex_pixels_;
     std::vector<float>             mesh_voxels_;
     std::uint64_t                  scene_key_ = 0;

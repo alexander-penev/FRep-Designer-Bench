@@ -82,4 +82,22 @@ emit_rt_group_shaders(const SceneGraph& full_scene,
                       const std::vector<SceneGraph>& group_scenes,
                       const TracerConfig& cfg = {});
 
+// ── Per-prototype shaders for the instanced broad-phase ──────────────────────
+//
+// Same shape as emit_rt_group_shaders, but each intersection shader marches in
+// its prototype's OBJECT space (gl_ObjectRayOriginEXT / gl_ObjectRayDirectionEXT)
+// rather than in world space. That is the whole difference between "one shader
+// per placement" and "one shader per shape": a world-space shader has the
+// placement baked into its SDF, so twenty-five columns need twenty-five
+// shaders, while an object-space one is written once and the TLAS instance
+// transform puts each copy where it belongs.
+//
+// `proto_scenes[i]` holds prototype i's body at the origin of its own space
+// (from factor_rt_instances + make_proto_scenes). rint_per_group is then
+// indexed by prototype, matching the SBT record offset each placement carries.
+std::expected<RtGroupShaderSet, std::string>
+emit_rt_instanced_shaders(const SceneGraph& full_scene,
+                          const std::vector<SceneGraph>& proto_scenes,
+                          const TracerConfig& cfg = {});
+
 }  // namespace frep::gpu
