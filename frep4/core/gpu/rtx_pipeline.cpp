@@ -1021,19 +1021,33 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     VkImageView    image_view   = frt->view;
     const bool     frame_cached = frt->cached;
 
-    VkDescriptorPoolSize ps[2]{};
-    ps[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; ps[0].descriptorCount = 1;
-    ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; ps[1].descriptorCount = 1;
-    VkDescriptorPoolCreateInfo dpci{};
-    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpci.maxSets = 1; dpci.poolSizeCount = 2; dpci.pPoolSizes = ps;
+    VkAccelerationStructureKHR tlas_now = accel.tlas();
+    const bool desc_cached = cache && frame_cached && cache->frame_desc_set &&
+                             cache->frame_tlas == (const void*)tlas_now;
     VkDescriptorPool pool = VK_NULL_HANDLE;
-    vkCreateDescriptorPool(dev, &dpci, nullptr, &pool);
-    VkDescriptorSetAllocateInfo dsai{};
-    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    dsai.descriptorPool = pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &dsl;
-    VkDescriptorSet dset = VK_NULL_HANDLE;
-    vkAllocateDescriptorSets(dev, &dsai, &dset);
+    VkDescriptorSet  dset = VK_NULL_HANDLE;
+    if (desc_cached) {
+        pool = (VkDescriptorPool)cache->frame_desc_pool;
+        dset = (VkDescriptorSet)cache->frame_desc_set;
+    } else {
+        if (cache && cache->frame_desc_pool)
+            vkDestroyDescriptorPool(dev, (VkDescriptorPool)cache->frame_desc_pool, nullptr);
+        VkDescriptorPoolSize ps[2]{};
+        ps[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; ps[0].descriptorCount = 1;
+        ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; ps[1].descriptorCount = 1;
+        VkDescriptorPoolCreateInfo dpci{};
+        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpci.maxSets = 1; dpci.poolSizeCount = 2; dpci.pPoolSizes = ps;
+        vkCreateDescriptorPool(dev, &dpci, nullptr, &pool);
+        VkDescriptorSetAllocateInfo dsai{};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &dsl;
+        vkAllocateDescriptorSets(dev, &dsai, &dset);
+        if (cache && frame_cached) {
+            cache->frame_desc_pool = pool; cache->frame_desc_set = dset;
+            cache->frame_tlas = (const void*)tlas_now;
+        }
+    }
 
     VkAccelerationStructureKHR tlas = accel.tlas();
     VkWriteDescriptorSetAccelerationStructureKHR was{};
@@ -1051,19 +1065,27 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     w1.descriptorCount = 1; w1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w1.pImageInfo = &dii;
     VkWriteDescriptorSet writes[] = {w0, w1};
-    vkUpdateDescriptorSets(dev, 2, writes, 0, nullptr);
+    if (!desc_cached) vkUpdateDescriptorSets(dev, 2, writes, 0, nullptr);
 
-    VkCommandPoolCreateInfo cpci{};
-    cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    cpci.queueFamilyIndex = ctx.queue_family();
     VkCommandPool cpool = VK_NULL_HANDLE;
-    vkCreateCommandPool(dev, &cpci, nullptr, &cpool);
-    VkCommandBufferAllocateInfo cbai{};
-    cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cbai.commandPool = cpool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbai.commandBufferCount = 1;
     VkCommandBuffer cmd = VK_NULL_HANDLE;
-    vkAllocateCommandBuffers(dev, &cbai, &cmd);
+    if (cache && frame_cached && cache->frame_cmd_buf) {
+        cpool = (VkCommandPool)cache->frame_cmd_pool;
+        cmd   = (VkCommandBuffer)cache->frame_cmd_buf;
+        vkResetCommandPool(dev, cpool, 0);
+    } else {
+        VkCommandPoolCreateInfo cpci{};
+        cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpci.queueFamilyIndex = ctx.queue_family();
+        cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        vkCreateCommandPool(dev, &cpci, nullptr, &cpool);
+        VkCommandBufferAllocateInfo cbai{};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool = cpool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        vkAllocateCommandBuffers(dev, &cbai, &cmd);
+        if (cache && frame_cached) { cache->frame_cmd_pool = cpool; cache->frame_cmd_buf = cmd; }
+    }
 
     VkDeviceSize img_bytes = (VkDeviceSize)width * height * 4;  // rgba8
     VkBuffer       rb_buf = frt->readback;
@@ -1114,9 +1136,15 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
-    VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     VkFence fence = VK_NULL_HANDLE;
-    vkCreateFence(dev, &fci, nullptr, &fence);
+    if (cache && frame_cached && cache->frame_fence) {
+        fence = (VkFence)cache->frame_fence;
+        vkResetFences(dev, 1, &fence);
+    } else {
+        VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        vkCreateFence(dev, &fci, nullptr, &fence);
+        if (cache && frame_cached) cache->frame_fence = fence;
+    }
     auto t_trace0 = clk::now();
     vkQueueSubmit(ctx.queue(), 1, &si, fence);
     vkWaitForFences(dev, 1, &fence, VK_TRUE, ~0ull);
@@ -1139,9 +1167,11 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     out.trace_ms    = msf(t_trace0, t_trace1);
     out.readback_ms = msf(t_rb0, t_rb1);
 
-    vkDestroyFence(dev, fence, nullptr);
-    vkDestroyCommandPool(dev, cpool, nullptr);
-    vkDestroyDescriptorPool(dev, pool, nullptr);
+    if (!(cache && frame_cached)) {
+        vkDestroyFence(dev, fence, nullptr);
+        vkDestroyCommandPool(dev, cpool, nullptr);
+        vkDestroyDescriptorPool(dev, pool, nullptr);
+    }
     if (!frame_cached) {   // image + readback live in the cache on a hit
         vkDestroyImageView(dev, image_view, nullptr);
         vkDestroyImage(dev, image, nullptr);
