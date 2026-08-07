@@ -170,6 +170,59 @@ acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
     return f;
 }
 
+
+// Upload `bytes` into a device-local buffer through a temporary staging copy.
+//
+// The shader binding table is read by the hardware on every trace, to find the
+// shader for a hit. Leaving it in host-visible memory means those reads cross
+// PCIe (and on NVIDIA come from a write-combined mapping) on every dispatch,
+// which is a cost the compute path -- having no binding table at all -- never
+// pays. The table only changes when the shader set does, and that is already
+// cached, so uploading it once to VRAM costs nothing per frame.
+std::expected<Buf, std::string>
+mk_device_local_upload(const RtxCtx& ctx, const void* bytes, VkDeviceSize size,
+                       VkBufferUsageFlags usage) {
+    auto dst = mk_buf(ctx, size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true);
+    if (!dst) return dst;
+    auto stg = mk_buf(ctx, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, false);
+    if (!stg) return std::unexpected(stg.error());
+    void* p = nullptr;
+    vkMapMemory(ctx.device(), stg->mem, 0, size, 0, &p);
+    std::memcpy(p, bytes, (std::size_t)size);
+    vkUnmapMemory(ctx.device(), stg->mem);
+
+    VkCommandPoolCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    cpi.queueFamilyIndex = ctx.queue_family();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    vkCreateCommandPool(ctx.device(), &cpi, nullptr, &pool);
+    VkCommandBufferAllocateInfo cbai{};
+    cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbai.commandPool = pool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(ctx.device(), &cbai, &cmd);
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    VkBufferCopy region{}; region.size = size;
+    vkCmdCopyBuffer(cmd, stg->buf, dst->buf, 1, &region);
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+    vkQueueSubmit(ctx.queue(), 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx.queue());
+    vkDestroyCommandPool(ctx.device(), pool, nullptr);
+    vkDestroyBuffer(ctx.device(), stg->buf, nullptr);
+    vkFreeMemory(ctx.device(), stg->mem, nullptr);
+    return dst;
+}
+
 VkDeviceAddress buf_addr(const RtxCtx& ctx, VkBuffer buf) {
     // core in 1.2 — call directly (see note in rtx_accel.cpp)
     VkBufferDeviceAddressInfo i{};
@@ -431,20 +484,14 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
 
     region = align_up(stride, base_align);
     VkDeviceSize sbt_size = region * 3;
-    auto sbt_built = mk_buf(ctx, sbt_size,
-                      VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
-                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+    std::vector<std::uint8_t> sbt_host((std::size_t)sbt_size, 0);
+    for (std::uint32_t g = 0; g < 3; ++g)
+        std::memcpy(sbt_host.data() + region * g,
+                    handles.data() + handle_size * g, handle_size);
+    auto sbt_built = mk_device_local_upload(
+        ctx, sbt_host.data(), sbt_size,
+        VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR);
     if (!sbt_built) return std::unexpected(sbt_built.error());
-    {
-        std::uint8_t* p = nullptr;
-        vkMapMemory(dev, sbt_built->mem, 0, sbt_size, 0, (void**)&p);
-        std::memset(p, 0, sbt_size);
-        for (std::uint32_t g = 0; g < 3; ++g)
-            std::memcpy(p + region * g, handles.data() + handle_size * g, handle_size);
-        vkUnmapMemory(dev, sbt_built->mem);
-    }
     sbt = *sbt_built;
     sbt_buf_handle = sbt_built->buf;
     sbt_base = buf_addr(ctx, sbt_built->buf);
@@ -925,23 +972,16 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     miss_sz = align_up(hstride, balign);
     hit_sz  = align_up(hstride * ng, balign);
     VkDeviceSize sbt_size = rgen_sz + miss_sz + hit_sz;
-    auto sbt_built = mk_buf(ctx, sbt_size,
-                      VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
-                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+    std::vector<std::uint8_t> sbt_host((std::size_t)sbt_size, 0);
+    std::memcpy(sbt_host.data(), handles.data() + hsize * 0, hsize);            // raygen
+    std::memcpy(sbt_host.data() + rgen_sz, handles.data() + hsize * 1, hsize);  // miss
+    for (std::uint32_t i = 0; i < ng; ++i)                                      // hits
+        std::memcpy(sbt_host.data() + rgen_sz + miss_sz + hstride * i,
+                    handles.data() + hsize * (2 + i), hsize);
+    auto sbt_built = mk_device_local_upload(
+        ctx, sbt_host.data(), sbt_size,
+        VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR);
     if (!sbt_built) return std::unexpected(sbt_built.error());
-    {
-        std::uint8_t* p = nullptr;
-        vkMapMemory(dev, sbt_built->mem, 0, sbt_size, 0, (void**)&p);
-        std::memset(p, 0, sbt_size);
-        std::memcpy(p, handles.data() + hsize * 0, hsize);            // raygen
-        std::memcpy(p + rgen_sz, handles.data() + hsize * 1, hsize);  // miss
-        for (std::uint32_t i = 0; i < ng; ++i)                        // hits
-            std::memcpy(p + rgen_sz + miss_sz + hstride * i,
-                        handles.data() + hsize * (2 + i), hsize);
-        vkUnmapMemory(dev, sbt_built->mem);
-    }
     sbt  = *sbt_built;
     base = buf_addr(ctx, sbt_built->buf);
 

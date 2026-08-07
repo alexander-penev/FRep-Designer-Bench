@@ -70,6 +70,11 @@ int main(int argc, char** argv) {
     // the marginal cost of rendering rather than the cost of owning the machine.
     double idle_cpu_w = 0, idle_gpu_w = 0;
     if (energy_s > 0) {
+        // Let the machine settle first. Measuring the floor immediately after
+        // the previous scene's run catches a package that is still hot and
+        // boosted, which inflates the baseline and then over-subtracts -- far
+        // enough to drive a busy CPU path's marginal energy to zero.
+        std::this_thread::sleep_for(std::chrono::seconds(3));
         const double t_idle = 3.0;
         if (cpu_e && cpu_e->available()) cpu_e->begin();
         if (gpu_e && gpu_e->available()) gpu_e->begin();
