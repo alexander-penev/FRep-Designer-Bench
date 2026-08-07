@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -152,11 +153,10 @@ int main(int argc, char** argv) {
         // Both become throughput below. Energy is measured around the render
         // call (a warmup render first so JIT compile isn't charged to energy).
         cpu.render(scene, W, H, exec::Tile{0, 0, W, H});  // warmup (JIT)
-        if (cpu_e_ok) cpu_e->begin();
         auto rc = cpu.render(scene, W, H, exec::Tile{0, 0, W, H});
-        std::optional<double> cpu_j = cpu_e_ok ? cpu_e->end() : std::nullopt;
         if (!rc.ok) { std::printf("  %5d  cpu render failed: %s\n", n, rc.error.c_str()); continue; }
-        double cpu_trace_ms = rc.render_ms;  // raymarch hot loop only
+        double cpu_trace_ms = rc.render_ms;   // provisional; replaced by the median below
+        std::optional<double> cpu_j;
 
         // RT multi-BLAS path.
         double rtx_trace_ms = -1.0;
@@ -192,12 +192,44 @@ int main(int argc, char** argv) {
             gpu::RtPushConstants pc;
             std::memcpy(&pc, &sp, sizeof(pc));
 
-            // GPU energy around the trace (the recurring per-frame GPU work).
+            // One sample of each path per round, medians per path. A single
+            // untimed pair let GPU clock state decide the result: consecutive
+            // runs of this benchmark disagreed by 2.5x at N=64. The trace also
+            // goes through the pipeline cache, so the pipeline, binding table
+            // and acceleration structure are built once rather than charged to
+            // every sample.
+            const int ROUNDS = 7;
+            gpu::RtxPipelineCache pcache;
+            std::vector<double> cpu_s, rtx_s;
+
+            for (int w = 0; w < 2; ++w) {   // warm both devices and the cache
+                cpu.render(scene, W, H, exec::Tile{0, 0, W, H});
+                auto wi = gpu::rtx_trace_groups_cached(*ctx, *accel, pcache,
+                                                       rgen, rints, rchit, rmiss, pc, W, H);
+                if (!wi) { err = wi.error(); break; }
+            }
+            if (!err.empty()) { pcache.release(*ctx); break; }
+
+            if (cpu_e_ok) cpu_e->begin();
             if (gpu_e_ok) gpu_e->begin();
-            auto img = gpu::rtx_trace_groups(*ctx, *accel, rgen, rints, rchit, rmiss, pc, W, H);
-            if (!img) { err = img.error(); break; }
-            rtx_trace_ms = img->trace_ms;
-            if (gpu_e_ok) { auto j = gpu_e->end(); if (j) gpu_j = *j; }
+            for (int r = 0; r < ROUNDS; ++r) {
+                auto rr = cpu.render(scene, W, H, exec::Tile{0, 0, W, H});
+                if (rr.ok) cpu_s.push_back(rr.render_ms);
+                auto im = gpu::rtx_trace_groups_cached(*ctx, *accel, pcache,
+                                                       rgen, rints, rchit, rmiss, pc, W, H);
+                if (!im) { err = im.error(); break; }
+                rtx_s.push_back(im->trace_ms);
+            }
+            if (cpu_e_ok) { auto j = cpu_e->end(); if (j) cpu_j = *j / ROUNDS; }
+            if (gpu_e_ok) { auto j = gpu_e->end(); if (j) gpu_j = *j / ROUNDS; }
+            pcache.release(*ctx);
+            if (!err.empty()) break;
+
+            auto med = [](std::vector<double> v) {
+                std::sort(v.begin(), v.end()); return v.empty() ? -1.0 : v[v.size() / 2];
+            };
+            if (!cpu_s.empty()) cpu_trace_ms = med(cpu_s);
+            rtx_trace_ms = med(rtx_s);
         } while (false);
 
         if (rtx_trace_ms < 0) {
