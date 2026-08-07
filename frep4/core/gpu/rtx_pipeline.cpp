@@ -83,7 +83,9 @@ mk_readback_buf(const RtxCtx& ctx, VkDeviceSize size) {
                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, false);
 }
 
-// Output rgba32f storage image + its readback buffer for one frame. When
+// Output rgba8 storage image + its readback buffer for one frame. The format
+// matches the compute path: the frame is 8 bits per channel on both, so the RT
+// path no longer moves four times the bytes for the same picture. When
 // `cacheable` and a cache is supplied, these are reused across frames while the
 // extent is unchanged (the two ~W*H*16-byte allocations otherwise recur every
 // frame); a resize frees the stale pair and rebuilds. `cached==true` means the
@@ -127,7 +129,7 @@ acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
     ici.extent = { (std::uint32_t)width, (std::uint32_t)height, 1 };
     ici.mipLevels = 1; ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -150,7 +152,7 @@ acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
     VkImageViewCreateInfo ivci{};
     ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     ivci.image = f.image; ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
     ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vkCreateImageView(dev, &ivci, nullptr, &f.view);
 
@@ -228,6 +230,11 @@ void RtxPipelineCache::release(const RtxCtx& ctx) {
     if (frame_image_mem)  vkFreeMemory(dev, (VkDeviceMemory)frame_image_mem, nullptr);
     if (frame_readback)   vkDestroyBuffer(dev, (VkBuffer)frame_readback, nullptr);
     if (frame_readback_mem) vkFreeMemory(dev, (VkDeviceMemory)frame_readback_mem, nullptr);
+    if (frame_fence)     vkDestroyFence(dev, (VkFence)frame_fence, nullptr);
+    if (frame_cmd_pool)  vkDestroyCommandPool(dev, (VkCommandPool)frame_cmd_pool, nullptr);
+    if (frame_desc_pool) vkDestroyDescriptorPool(dev, (VkDescriptorPool)frame_desc_pool, nullptr);
+    frame_fence = frame_cmd_pool = frame_cmd_buf = nullptr;
+    frame_desc_pool = frame_desc_set = nullptr; frame_tlas = nullptr;
     frame_image = frame_image_mem = frame_image_view = nullptr;
     frame_readback = frame_readback_mem = nullptr;
     frame_w = frame_h = 0;
@@ -509,23 +516,39 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     }
 
     // ── Descriptor pool + set ───────────────────────────────────────────────
-    VkDescriptorPoolSize ps[4]{};
-    ps[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; ps[0].descriptorCount = 1;
-    ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; ps[1].descriptorCount = 1;
-    ps[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[2].descriptorCount = 1;
-    ps[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[3].descriptorCount = 1;
-    VkDescriptorPoolCreateInfo dpci{};
-    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpci.maxSets = 1;
-    dpci.poolSizeCount = 2u + (has_tex ? 1u : 0u) + (has_mesh ? 1u : 0u);
-    dpci.pPoolSizes = ps;
+    // The descriptor set binds the TLAS and the output image; with both cached
+    // it describes the same thing every frame, so build it once.
+    VkAccelerationStructureKHR tlas_now = accel.tlas();
+    const bool desc_cached = cache && frame_cached && cache->frame_desc_set &&
+                             cache->frame_tlas == (const void*)tlas_now;
     VkDescriptorPool pool = VK_NULL_HANDLE;
-    vkCreateDescriptorPool(dev, &dpci, nullptr, &pool);
-    VkDescriptorSetAllocateInfo dsai{};
-    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    dsai.descriptorPool = pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &dsl;
-    VkDescriptorSet dset = VK_NULL_HANDLE;
-    vkAllocateDescriptorSets(dev, &dsai, &dset);
+    VkDescriptorSet  dset = VK_NULL_HANDLE;
+    if (desc_cached) {
+        pool = (VkDescriptorPool)cache->frame_desc_pool;
+        dset = (VkDescriptorSet)cache->frame_desc_set;
+    } else {
+        if (cache && cache->frame_desc_pool)
+            vkDestroyDescriptorPool(dev, (VkDescriptorPool)cache->frame_desc_pool, nullptr);
+        VkDescriptorPoolSize ps[4]{};
+        ps[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; ps[0].descriptorCount = 1;
+        ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; ps[1].descriptorCount = 1;
+        ps[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[2].descriptorCount = 1;
+        ps[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[3].descriptorCount = 1;
+        VkDescriptorPoolCreateInfo dpci{};
+        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpci.maxSets = 1;
+        dpci.poolSizeCount = 2u + (has_tex ? 1u : 0u) + (has_mesh ? 1u : 0u);
+        dpci.pPoolSizes = ps;
+        vkCreateDescriptorPool(dev, &dpci, nullptr, &pool);
+        VkDescriptorSetAllocateInfo dsai{};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &dsl;
+        vkAllocateDescriptorSets(dev, &dsai, &dset);
+        if (cache && frame_cached) {
+            cache->frame_desc_pool = pool; cache->frame_desc_set = dset;
+            cache->frame_tlas = (const void*)tlas_now;
+        }
+    }
 
     VkAccelerationStructureKHR tlas = accel.tlas();
     VkWriteDescriptorSetAccelerationStructureKHR was{};
@@ -563,23 +586,33 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
         w3.pBufferInfo = &dbi_m;
         writes.push_back(w3);
     }
-    vkUpdateDescriptorSets(dev, (std::uint32_t)writes.size(), writes.data(), 0, nullptr);
+    if (!desc_cached)
+        vkUpdateDescriptorSets(dev, (std::uint32_t)writes.size(), writes.data(), 0, nullptr);
 
     // ── Command buffer: layout transition, trace, copy to buffer ────────────
-    VkCommandPoolCreateInfo cpci{};
-    cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    cpci.queueFamilyIndex = ctx.queue_family();
     VkCommandPool cpool = VK_NULL_HANDLE;
-    vkCreateCommandPool(dev, &cpci, nullptr, &cpool);
-    VkCommandBufferAllocateInfo cbai{};
-    cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cbai.commandPool = cpool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbai.commandBufferCount = 1;
     VkCommandBuffer cmd = VK_NULL_HANDLE;
-    vkAllocateCommandBuffers(dev, &cbai, &cmd);
+    const bool cmd_cached = cache && frame_cached && cache->frame_cmd_buf;
+    if (cmd_cached) {
+        cpool = (VkCommandPool)cache->frame_cmd_pool;
+        cmd   = (VkCommandBuffer)cache->frame_cmd_buf;
+        vkResetCommandPool(dev, cpool, 0);   // recorded commands only; keeps the pool
+    } else {
+        VkCommandPoolCreateInfo cpci{};
+        cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpci.queueFamilyIndex = ctx.queue_family();
+        cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        vkCreateCommandPool(dev, &cpci, nullptr, &cpool);
+        VkCommandBufferAllocateInfo cbai{};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool = cpool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        vkAllocateCommandBuffers(dev, &cbai, &cmd);
+        if (cache && frame_cached) { cache->frame_cmd_pool = cpool; cache->frame_cmd_buf = cmd; }
+    }
 
     // readback buffer (from the cached frame resources)
-    VkDeviceSize img_bytes = (VkDeviceSize)width * height * 4 * sizeof(float);
+    VkDeviceSize img_bytes = (VkDeviceSize)width * height * 4;  // rgba8
     VkBuffer       rb_buf = frt->readback;
     VkDeviceMemory rb_mem = frt->readback_mem;
 
@@ -633,9 +666,15 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
-    VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     VkFence fence = VK_NULL_HANDLE;
-    vkCreateFence(dev, &fci, nullptr, &fence);
+    if (cache && frame_cached && cache->frame_fence) {
+        fence = (VkFence)cache->frame_fence;
+        vkResetFences(dev, 1, &fence);
+    } else {
+        VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        vkCreateFence(dev, &fci, nullptr, &fence);
+        if (cache && frame_cached) cache->frame_fence = fence;
+    }
     auto t_trace0 = clk::now();
     vkQueueSubmit(ctx.queue(), 1, &si, fence);
     vkWaitForFences(dev, 1, &fence, VK_TRUE, ~0ull);
@@ -649,7 +688,9 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     {
         void* p = nullptr;
         vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
-        std::memcpy(out.rgba.data(), p, (size_t)img_bytes);
+        const auto* b = static_cast<const std::uint8_t*>(p);
+        for (std::size_t i = 0; i < out.rgba.size(); ++i)
+            out.rgba[i] = b[i] / 255.0f;
         vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();
@@ -659,9 +700,11 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     out.readback_ms = ms(t_rb0, t_rb1);
 
     // ── Teardown ────────────────────────────────────────────────────────────
-    vkDestroyFence(dev, fence, nullptr);
-    vkDestroyCommandPool(dev, cpool, nullptr);
-    vkDestroyDescriptorPool(dev, pool, nullptr);
+    if (!(cache && frame_cached)) {
+        vkDestroyFence(dev, fence, nullptr);
+        vkDestroyCommandPool(dev, cpool, nullptr);
+        vkDestroyDescriptorPool(dev, pool, nullptr);
+    }
     // The output image + readback buffer live in the cache when frame_cached;
     // only tear them down for the per-frame (tex/mesh or no-cache) case.
     if (!frame_cached) {
@@ -982,7 +1025,7 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     vkAllocateCommandBuffers(dev, &cbai, &cmd);
 
-    VkDeviceSize img_bytes = (VkDeviceSize)width * height * 4 * sizeof(float);
+    VkDeviceSize img_bytes = (VkDeviceSize)width * height * 4;  // rgba8
     VkBuffer       rb_buf = frt->readback;
     VkDeviceMemory rb_mem = frt->readback_mem;
 
@@ -1046,7 +1089,9 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     {
         void* p = nullptr;
         vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
-        std::memcpy(out.rgba.data(), p, (size_t)img_bytes);
+        const auto* b = static_cast<const std::uint8_t*>(p);
+        for (std::size_t i = 0; i < out.rgba.size(); ++i)
+            out.rgba[i] = b[i] / 255.0f;
         vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();

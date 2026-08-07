@@ -199,7 +199,7 @@ emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg) {
           << shared_block  // for sky_color_s (analytic scenes have no extra bindings)
           << "layout(location = 0) rayPayloadEXT vec3 prd;\n"
           << "layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;\n"
-          << "layout(set = 0, binding = 1, rgba32f) uniform image2D out_img;\n"
+          << "layout(set = 0, binding = 1, rgba8) uniform image2D out_img;\n"
           << "void main() {\n"
           << "    ivec2 pix = ivec2(gl_LaunchIDEXT.xy);\n"
           << "    int W = pc.width, H = pc.height;\n"

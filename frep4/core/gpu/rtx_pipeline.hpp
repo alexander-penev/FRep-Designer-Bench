@@ -127,6 +127,20 @@ struct RtxPipelineCache {
     void*         frame_readback_mem = nullptr;// VkDeviceMemory
     int           frame_w = 0, frame_h = 0;    // extent the above were built for
 
+    // Per-frame Vulkan objects that do not actually change between frames: the
+    // descriptor pool and set (bound to the TLAS and the cached output image),
+    // the command pool and buffer, and the fence. Only the recorded commands
+    // change, because the push constants carry the camera, so the buffer is
+    // reset and re-recorded each frame while the objects themselves persist.
+    // Creating them per frame cost ~0.26 ms, which is a third of a frame once
+    // the trace itself is under a millisecond.
+    void*         frame_desc_pool = nullptr;   // VkDescriptorPool
+    void*         frame_desc_set = nullptr;    // VkDescriptorSet
+    void*         frame_cmd_pool = nullptr;    // VkCommandPool
+    void*         frame_cmd_buf = nullptr;     // VkCommandBuffer
+    void*         frame_fence = nullptr;       // VkFence
+    const void*   frame_tlas = nullptr;        // TLAS the set was written for
+
     // Release all cached GPU objects. Safe to call repeatedly; no-op if empty.
     void release(const RtxCtx& ctx);
     ~RtxPipelineCache() = default;  // caller must release() explicitly
