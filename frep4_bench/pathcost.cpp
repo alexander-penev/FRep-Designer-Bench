@@ -61,6 +61,11 @@ int main(int argc, char** argv) {
 
     auto cpu_e = make_cpu_energy_counter();
     auto gpu_e = make_gpu_energy_counter();
+    const bool have_cpu = cpu_e && cpu_e->available();
+    const bool have_gpu = gpu_e && gpu_e->available();
+    if (!have_cpu)
+        std::fprintf(stderr, "note: CPU energy unavailable "
+                     "(needs kernel.perf_event_paranoid <= 0); reported as -1\n");
 
     // Idle baseline. Both counters measure the whole device, and neither device
     // is off while the other works: this GPU draws ~18 W and this CPU package
@@ -151,8 +156,13 @@ int main(int argc, char** argv) {
                 { if (auto v = cpu_e->end()) j_cpu = *v - idle_cpu_w * el; }
             if (gpu_e && gpu_e->available())
                 { if (auto v = gpu_e->end()) j_gpu = *v - idle_gpu_w * el; }
-            if (j_cpu < 0) j_cpu = 0;   // below the noise floor of the baseline
-            if (j_gpu < 0) j_gpu = 0;
+            // Clamp only a *measured* value that fell below the baseline's
+            // noise floor. A counter that reported nothing stays at -1, which
+            // the table prints as a dash: "unavailable" and "zero" are not the
+            // same claim, and collapsing them silently reported a busy CPU path
+            // as costing no energy when the RAPL counter was simply locked.
+            if (have_cpu && j_cpu < 0) j_cpu = 0;
+            if (have_gpu && j_gpu < 0) j_gpu = 0;
         }
         if (frames <= 0) frames = 1;
         double run = med(run_ms), wall = med(wall_ms), wb = med(warmbuild_ms);
