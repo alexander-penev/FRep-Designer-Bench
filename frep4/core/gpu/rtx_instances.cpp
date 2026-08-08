@@ -144,17 +144,23 @@ std::optional<RtInstancing> factor_rt_instances(const FRepNode::Ptr& root) {
             w2o = compose(step, w2o);
             body = body->children[0];
         }
-        if (!body) return std::nullopt;
 
         // An InstanceNode is a reference, not a shape: descend to the shared
         // target so the prototype is the geometry itself. (This is the same
         // sharing factor_instances recorded; here we finally consume it.)
-        while (body->kind == NodeKind::Instance && body->children.size() == 1 &&
-               body->children[0])
+        while (body && body->kind == NodeKind::Instance &&
+               body->children.size() == 1 && body->children[0])
             body = body->children[0];
 
+        // A member we cannot place — a collapsed scale with no inverse, or an
+        // empty chain — becomes its own prototype at the identity, which is
+        // exactly what the per-group build would have done with it. One
+        // degenerate member must not cost the other thousand their sharing.
         Affine o2w;
-        if (!invert(w2o, o2w)) return std::nullopt;
+        if (!body || !invert(w2o, o2w)) {
+            body = m;
+            o2w  = Affine{};
+        }
 
         std::size_t h = body->structural_hash();
         auto it = proto_of.find(h);

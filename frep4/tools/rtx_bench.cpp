@@ -266,13 +266,30 @@ int main(int argc, char** argv) {
             gpu::RtPushConstants pc;
             std::memcpy(&pc, &sp, sizeof(pc));
 
-            // One sample of each path per round, medians per path. A single
-            // untimed pair let GPU clock state decide the result: consecutive
-            // runs of this benchmark disagreed by 2.5x at N=64. The trace also
-            // goes through the pipeline cache, so the pipeline, binding table
-            // and acceleration structure are built once rather than charged to
-            // every sample.
-            const int ROUNDS = 7;
+            // Interleaved BURSTS, medians per path. Alternating one CPU render
+            // with one GPU trace was the previous scheme, and at high N it
+            // measured the driver's power-state machine instead of the
+            // renderer: the CPU render grows to ~270 ms at N=256 while the
+            // trace stays tens of ms, so the GPU sits idle ~87% of the time,
+            // parks in P5/P8 (585 MHz core, 810 MHz memory were observed), and
+            // each trace runs partly at a low clock. The symptom was a fourfold
+            // spread in the same measurement -- N=256 read 28, 78 and 121 Mpix/s
+            // depending only on how loaded the machine had been -- while N=64,
+            // whose CPU phase is four times shorter, held to 1%.
+            //
+            // So: keep each device busy for a stretch long enough to hold its
+            // clocks, and alternate at the level of stretches rather than
+            // single samples. Slow drift still averages across both paths;
+            // neither path is charged for the other's idle gaps.
+            const int    ROUNDS = 5;
+            const double BURST_MS = 300.0;
+            auto burst = [&](auto&& one_sample) {
+                auto b0 = std::chrono::steady_clock::now();
+                do { if (!one_sample()) return false; }
+                while (std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - b0).count() < BURST_MS);
+                return true;
+            };
             gpu::RtxPipelineCache pcache;
             std::vector<double> cpu_s, rtx_s;
 
@@ -288,15 +305,25 @@ int main(int argc, char** argv) {
             if (cpu_e_ok) cpu_e->begin();
             if (gpu_e_ok) gpu_e->begin();
             for (int r = 0; r < ROUNDS; ++r) {
-                auto rr = cpu.render(scene, W, H, exec::Tile{0, 0, W, H});
-                if (rr.ok) cpu_s.push_back(rr.render_ms);
-                auto im = gpu::rtx_trace_groups_cached(*ctx, *accel, pcache,
-                                                       rgen, rints, rchit, rmiss, pc, W, H);
-                if (!im) { err = im.error(); break; }
-                rtx_s.push_back(im->trace_ms);
+                burst([&] {
+                    auto rr = cpu.render(scene, W, H, exec::Tile{0, 0, W, H});
+                    if (rr.ok) cpu_s.push_back(rr.render_ms);
+                    return true;
+                });
+                if (!burst([&] {
+                        auto im = gpu::rtx_trace_groups_cached(
+                            *ctx, *accel, pcache, rgen, rints, rchit, rmiss, pc, W, H);
+                        if (!im) { err = im.error(); return false; }
+                        rtx_s.push_back(im->trace_ms);
+                        return true;
+                    })) break;
             }
-            if (cpu_e_ok) { auto j = cpu_e->end(); if (j) cpu_j = *j / ROUNDS; }
-            if (gpu_e_ok) { auto j = gpu_e->end(); if (j) gpu_j = *j / ROUNDS; }
+            // Energy per frame divides by the frames each device actually ran,
+            // which bursting makes unequal between the two.
+            if (cpu_e_ok && !cpu_s.empty())
+                { auto j = cpu_e->end(); if (j) cpu_j = *j / (double)cpu_s.size(); }
+            if (gpu_e_ok && !rtx_s.empty())
+                { auto j = gpu_e->end(); if (j) gpu_j = *j / (double)rtx_s.size(); }
             pcache.release(*ctx);
             if (!err.empty()) break;
 
