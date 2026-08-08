@@ -45,9 +45,20 @@ int main(int argc, char** argv) {
     // nothing: the window has to be seconds, not frames, or the counter returns
     // zero for the fast paths and noise for the slow ones. 0 disables.
     double energy_s = 0;
-    for (int i = 3; i < argc; ++i)
-        if (std::string(argv[i]) == "--energy" && i + 1 < argc)
-            energy_s = std::atof(argv[++i]);
+    // Shading level. This exists because the cross-system render comparison is
+    // otherwise not like-for-like: libfive's Heightmap::render and mpr's
+    // render3D both produce depth + surface normal and stop there, while our
+    // default configuration also runs a shadow march, five ambient-occlusion
+    // samples and a Cook-Torrance specular term at every hit. Those are extra
+    // evaluations of the whole field per pixel, not extra arithmetic on one.
+    // "geometry" turns them off so the work per pixel is what the other systems
+    // actually do; "full" is the default the interactive app ships with.
+    bool geometry_only = false;
+    for (int i = 3; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--energy" && i + 1 < argc) energy_s = std::atof(argv[++i]);
+        else if (a == "--geometry") geometry_only = true;
+    }
 
     std::string scene_name = path;
     if (auto sl = scene_name.find_last_of('/'); sl != std::string::npos)
@@ -100,7 +111,9 @@ int main(int argc, char** argv) {
                                PathKind::GpuIr, PathKind::GpuRtx };
     const int WARM = 3, ITERS = 15;
 
-    std::printf("scene %s   %dx%d   (ms)\n", path.c_str(), R, R);
+    std::printf("scene %s   %dx%d   shading=%s   (ms)\n", path.c_str(), R, R,
+                geometry_only ? "geometry (depth+normal, matches libfive/mpr)"
+                              : "full (shadows+AO+specular)");
     std::printf("%-9s | %10s | %10s | %10s | %9s | %7s %7s\n",
                 "path", "build", "run", "wall", "run ns/ray", "mJ/f", "mJ/f");
     std::printf("          |            |            |            |           |"
@@ -110,6 +123,11 @@ int main(int argc, char** argv) {
     for (PathKind pk : paths) {
         const char* name = path_kind_name(pk);
         TracerConfig cfg;
+        if (geometry_only) {
+            cfg.enable_shadows  = false;
+            cfg.enable_ao       = false;
+            cfg.enable_specular = false;
+        }
         auto exec = make_executor(pk, cfg);
         if (!exec || !exec->available()) {
             std::printf("%-9s | %10s\n", name, "unavailable");

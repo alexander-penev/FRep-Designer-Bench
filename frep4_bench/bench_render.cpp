@@ -33,11 +33,25 @@ int main(int argc, char** argv) {
     int R = std::atoi(argv[1]);
     if (R <= 0) R = 256;
 
+    // Shading level, for a like-for-like cross-system comparison. libfive's
+    // Heightmap::render and mpr's render3D both produce depth plus a surface
+    // normal and stop; our default also runs a shadow march, five ambient-
+    // occlusion samples and a specular term at every hit, and each of those is
+    // another evaluation of the whole field, not more arithmetic on one. On a
+    // single primitive the difference vanishes into the primary march; on a
+    // 27-object scene it is a factor of two. --geometry matches what the other
+    // systems compute so the comparison measures the compiler rather than the
+    // shading model.
+    bool geometry_only = false;
+    for (int i = 2; i < argc; ++i)
+        if (std::string(argv[i]) == "--geometry") geometry_only = true;
+
     const PathKind paths[] = {
         PathKind::CpuIr, PathKind::GpuGlsl, PathKind::GpuIr, PathKind::GpuRtx };
 
     for (int a = 2; a < argc; ++a) {
         std::string path = argv[a];
+        if (path == "--geometry") continue;
         std::string name = path;
         auto slash = name.find_last_of('/');
         if (slash != std::string::npos) name = name.substr(slash + 1);
@@ -61,6 +75,11 @@ int main(int argc, char** argv) {
         for (PathKind pk : paths) {
             const char* backend = path_kind_name(pk);
             TracerConfig cfg;
+            if (geometry_only) {
+                cfg.enable_shadows  = false;
+                cfg.enable_ao       = false;
+                cfg.enable_specular = false;
+            }
             auto exec = make_executor(pk, cfg);
             if (!exec || !exec->available()) {
                 std::fprintf(stderr, "  %-8s %-16s unavailable\n",
