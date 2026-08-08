@@ -91,6 +91,24 @@ public:
     // Number of TLAS instances (= groups for build_groups, 1 otherwise).
     std::uint32_t instance_count() const { return inst_count_; }
 
+    // Device memory the acceleration structure occupies, in bytes. Reported
+    // because memory is one of the axes the backends are compared on, and it is
+    // where instancing shows its clearest win: N copies of one shape need one
+    // bottom-level structure, not N. Broken out because the parts scale
+    // differently -- `blas` is per PROTOTYPE while `instances` is per placement,
+    // so the instanced build trades a large term for a small one.
+    struct Memory {
+        std::uint64_t blas = 0;       // bottom-level structures + their AABB inputs
+        std::uint64_t tlas = 0;       // top-level structure
+        std::uint64_t instances = 0;  // the TLAS instance array
+        std::uint64_t scratch = 0;    // build scratch (freeable after the build)
+        std::uint64_t total() const { return blas + tlas + instances + scratch; }
+    };
+    const Memory& memory() const { return mem_; }
+    std::uint32_t blas_count() const {
+        return g_blas_.empty() ? (blas_ ? 1u : 0u) : (std::uint32_t)g_blas_.size();
+    }
+
     VkAccelerationStructureKHR tlas() const { return tlas_; }
     std::uint64_t tlas_device_address() const { return tlas_addr_; }
 
@@ -109,6 +127,7 @@ private:
     VkAccelerationStructureKHR tlas_ = nullptr;
     std::uint64_t   tlas_addr_ = 0;
     std::uint32_t   inst_count_ = 1;
+    Memory          mem_{};
 
     // Multi-BLAS: one entry per group. Parallel to the single-BLAS
     // members above; build_groups fills these instead of blas_/aabb_buf_.

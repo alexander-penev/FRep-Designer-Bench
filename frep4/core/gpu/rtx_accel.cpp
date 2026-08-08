@@ -153,7 +153,7 @@ RtAccel& RtAccel::operator=(RtAccel&& o) noexcept {
         inst_buf_ = o.inst_buf_; inst_mem_ = o.inst_mem_;
         scratch_buf_ = o.scratch_buf_; scratch_mem_ = o.scratch_mem_;
         blas_ = o.blas_; tlas_ = o.tlas_; tlas_addr_ = o.tlas_addr_;
-        inst_count_ = o.inst_count_;
+        inst_count_ = o.inst_count_; mem_ = o.mem_;
         g_aabb_buf_ = std::move(o.g_aabb_buf_); g_aabb_mem_ = std::move(o.g_aabb_mem_);
         g_blas_buf_ = std::move(o.g_blas_buf_); g_blas_mem_ = std::move(o.g_blas_mem_);
         g_scratch_buf_ = std::move(o.g_scratch_buf_);
@@ -427,6 +427,7 @@ RtAccel::build_instanced(const RtxCtx& ctx, const std::vector<RtAabb>& proto_box
                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                          true, a.g_aabb_buf_[i], a.g_aabb_mem_[i]);
         if (!up) return std::unexpected(up.error());
+        a.mem_.blas += sizeof(aabb);
 
         VkAccelerationStructureGeometryKHR geo{};
         geo.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -461,6 +462,8 @@ RtAccel::build_instanced(const RtxCtx& ctx, const std::vector<RtAabb>& proto_box
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true,
                               a.g_scratch_buf_[i], a.g_scratch_mem_[i]);
         if (!rs) return std::unexpected(rs.error());
+        a.mem_.blas    += sizes.accelerationStructureSize;
+        a.mem_.scratch += sizes.buildScratchSize;
 
         VkAccelerationStructureCreateInfoKHR ci{};
         ci.sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
@@ -520,6 +523,7 @@ RtAccel::build_instanced(const RtxCtx& ctx, const std::vector<RtAabb>& proto_box
                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                          true, a.inst_buf_, a.inst_mem_);
         if (!up) return std::unexpected(up.error());
+        a.mem_.instances += insts.size() * sizeof(VkAccelerationStructureInstanceKHR);
 
         VkAccelerationStructureGeometryKHR geo{};
         geo.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -553,6 +557,7 @@ RtAccel::build_instanced(const RtxCtx& ctx, const std::vector<RtAabb>& proto_box
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true,
                               tscratch, tscratch_mem);
         if (!rs) return std::unexpected(rs.error());
+        a.mem_.tlas = sizes.accelerationStructureSize;
 
         VkAccelerationStructureCreateInfoKHR ci{};
         ci.sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;

@@ -301,6 +301,20 @@ inline std::string emit_instanced_closest_hit(const char* hdr,
     return s.str();
 }
 
+// The RT path consumes instancing structurally -- one BLAS and one shader per
+// prototype, placed by the TLAS -- so it does not also want the emitter's
+// Level 2 sharing, which turns each repeated shape into a subprogram CALL
+// inside the field. That trade is the wrong way round here: measured on a
+// 256-instance grid it shrank the closest-hit shader by 7% and halved the
+// trace, because the shadow and occlusion marches evaluate the field in a hot
+// loop where a call does not inline away. Recognition still happens upstream;
+// only this consumer opts out of the code-size half of it.
+inline TracerConfig rt_cfg(const TracerConfig& cfg) {
+    TracerConfig c = cfg;
+    c.instance_shared_subprograms = false;
+    return c;
+}
+
 // Miss shader for the shadow ray. Reached only when nothing was hit between the
 // surface and the light, which is exactly the definition of unoccluded.
 inline std::string emit_shadow_miss(const char* hdr) {
@@ -314,7 +328,8 @@ inline std::string emit_shadow_miss(const char* hdr) {
 }  // namespace
 
 std::expected<RtShaderSet, std::string>
-emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg) {
+emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg_in) {
+    const TracerConfig cfg = rt_cfg(cfg_in);
     auto comp = GlslEmitter::emit(scene, cfg);
     if (!comp) return std::unexpected("rtx_shaders: " + comp.error());
 
@@ -453,7 +468,8 @@ emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg) {
 static std::expected<RtGroupShaderSet, std::string>
 emit_rt_per_group(const SceneGraph& full_scene,
                   const std::vector<SceneGraph>& group_scenes,
-                  const TracerConfig& cfg, bool object_space) {
+                  const TracerConfig& cfg_in, bool object_space) {
+    const TracerConfig cfg = rt_cfg(cfg_in);
     if (group_scenes.empty())
         return std::unexpected("rtx_shaders: no groups to emit");
 

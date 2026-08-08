@@ -76,6 +76,14 @@ gpu::RtAabb to_aabb(const FRepNode::AABB& b, float m = 0.05f) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // The NVIDIA driver caches compiled shaders on disk, so a second run of the
+    // same scene reports a build time that is a cache lookup: 30 ms where the
+    // first run measured 5241 ms. Any "cold build" figure taken without this is
+    // meaningless, and remembering to set it in the shell is not a protocol.
+    // Set before the first Vulkan call, which is where the driver reads it.
+    if (!std::getenv("FREP_RTX_KEEP_SHADER_CACHE"))
+        setenv("__GL_SHADER_DISK_CACHE", "0", 1);
+
     int W = 256, H = 256;
     bool energy = false;
     bool factor = false;
@@ -148,17 +156,23 @@ int main(int argc, char** argv) {
     // pipeline + SBT construction that scales with it; it is amortized over
     // frames and excluded from the throughput columns, but it is the reason the
     // per-group build ran out of road at a thousand objects.
+    // "shaders" and "BLAS" are the counts instancing collapses; "AS MiB" is the
+    // device memory those structures occupy. The +-% after each throughput is
+    // the inter-quartile half-range over the samples, printed because a median
+    // on its own hides a number that is steady within a run and wrong between
+    // runs -- which is how this benchmark misled twice before.
     if (energy)
-        std::printf("  %5s  %7s  %8s  %9s  %12s  %12s  %12s  %14s  %14s\n",
-                    "N", "groups", "shaders", "build ms",
+        std::printf("  %5s  %7s  %7s  %5s  %8s  %9s  %16s  %16s  %12s  %14s  %14s\n",
+                    "N", "groups", "shaders", "BLAS", "AS MiB", "build ms",
                     "cpu Mpix/s", "rtx Mpix/s", "sum Mpix/s",
                     "cpu Mpix/kWh", "rtx Mpix/kWh");
     else
-        std::printf("  %5s  %7s  %8s  %9s  %12s  %12s  %12s\n",
-                    "N", "groups", "shaders", "build ms",
+        std::printf("  %5s  %7s  %7s  %5s  %8s  %9s  %16s  %16s  %12s\n",
+                    "N", "groups", "shaders", "BLAS", "AS MiB", "build ms",
                     "cpu Mpix/s", "rtx Mpix/s", "sum Mpix/s");
-    std::printf("  ----------------------------------------------------------------"
-                "----------------%s\n", energy ? "--------------------------------" : "");
+    std::printf("  --------------------------------------------------------------------"
+                "--------------------------------%s\n",
+                energy ? "--------------------------------" : "");
 
     const double mpix = (double)W * H / 1e6;
 
@@ -193,6 +207,10 @@ int main(int argc, char** argv) {
         double rtx_trace_ms = -1.0;
         double rtx_build_ms = -1.0;   // cold pipeline + SBT (amortized after)
         int    n_shaders = 0;         // intersection shaders the pipeline needs
+        double cpu_spread = -1, rtx_spread = -1;   // inter-quartile half-range, %
+        int    n_samples = 0;
+        std::uint64_t as_bytes = 0;   // acceleration-structure device memory
+        std::uint32_t as_blas = 0;    // bottom-level structures actually built
         double gpu_j = -1.0;
         std::string err;
         do {
@@ -348,8 +366,25 @@ int main(int argc, char** argv) {
             auto med = [](std::vector<double> v) {
                 std::sort(v.begin(), v.end()); return v.empty() ? -1.0 : v[v.size() / 2];
             };
+            // Spread as well as the median. A median alone hides exactly the
+            // failure this benchmark has already been caught by twice: a number
+            // that is stable within a run and wrong between runs. Reported as
+            // the half-range of the middle of the distribution relative to the
+            // median, so a reader can see when a row is not worth quoting.
+            auto spread = [&](std::vector<double> v) {
+                if (v.size() < 4) return -1.0;
+                std::sort(v.begin(), v.end());
+                double lo = v[v.size() / 4], hi = v[(3 * v.size()) / 4];
+                double m = v[v.size() / 2];
+                return m > 0 ? 100.0 * (hi - lo) / (2.0 * m) : -1.0;
+            };
             if (!cpu_s.empty()) cpu_trace_ms = med(cpu_s);
             rtx_trace_ms = med(rtx_s);
+            cpu_spread = spread(cpu_s);
+            rtx_spread = spread(rtx_s);
+            n_samples  = (int)rtx_s.size();
+            as_bytes   = accel->memory().total();
+            as_blas    = accel->blas_count();
         } while (false);
 
         if (rtx_trace_ms < 0) {
@@ -369,14 +404,21 @@ int main(int argc, char** argv) {
                 if (gpu_j > 0)
                     std::snprintf(rtx_ek, sizeof(rtx_ek), "%.1f",
                                   power::pixels_per_kwh(px, gpu_j) / 1e6);
-                std::printf("  %5d  %7zu  %8d  %9.1f  %12.1f  %12.1f  %12.1f  %14s  %14s\n",
-                            n, groups.size(), n_shaders, rtx_build_ms,
-                            cpu_tp, rtx_tp, cpu_tp + rtx_tp, cpu_ek, rtx_ek);
+                std::printf("  %5d  %7zu  %7d  %5u  %8.2f  %9.1f  %10.1f+-%3.0f%%  "
+                            "%10.1f+-%3.0f%%  %12.1f  %14s  %14s\n",
+                            n, groups.size(), n_shaders, as_blas,
+                            (double)as_bytes / (1024.0 * 1024.0), rtx_build_ms,
+                            cpu_tp, cpu_spread, rtx_tp, rtx_spread,
+                            cpu_tp + rtx_tp, cpu_ek, rtx_ek);
             } else {
-                std::printf("  %5d  %7zu  %8d  %9.1f  %12.1f  %12.1f  %12.1f\n",
-                            n, groups.size(), n_shaders, rtx_build_ms,
-                            cpu_tp, rtx_tp, cpu_tp + rtx_tp);
+                std::printf("  %5d  %7zu  %7d  %5u  %8.2f  %9.1f  %10.1f+-%3.0f%%  "
+                            "%10.1f+-%3.0f%%  %12.1f\n",
+                            n, groups.size(), n_shaders, as_blas,
+                            (double)as_bytes / (1024.0 * 1024.0), rtx_build_ms,
+                            cpu_tp, cpu_spread, rtx_tp, rtx_spread,
+                            cpu_tp + rtx_tp);
             }
+            (void)n_samples;
         }
     }
     std::printf(
