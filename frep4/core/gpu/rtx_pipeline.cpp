@@ -276,6 +276,9 @@ void RtxPipelineCache::release(const RtxCtx& ctx) {
     for (void* m : group_rint_modules)
         if (m) vkDestroyShaderModule(dev, (VkShaderModule)m, nullptr);
     group_rint_modules.clear();
+    for (void* m : group_rchit_modules)
+        if (m) vkDestroyShaderModule(dev, (VkShaderModule)m, nullptr);
+    group_rchit_modules.clear();
     if (sbt_buffer) vkDestroyBuffer(dev, (VkBuffer)sbt_buffer, nullptr);
     if (sbt_memory) vkFreeMemory(dev, (VkDeviceMemory)sbt_memory, nullptr);
     if (frame_image_view) vkDestroyImageView(dev, (VkImageView)frame_image_view, nullptr);
@@ -383,7 +386,11 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     // ── Descriptor set layout: TLAS + storage image ─────────────────────────
     VkDescriptorSetLayoutBinding b0{};  // TLAS
     b0.binding = 0; b0.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    b0.descriptorCount = 1; b0.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    b0.descriptorCount = 1;
+    // Closest-hit reads the TLAS as well on the instanced path: its shadow ray
+    // is traced from there rather than marched over the field.
+    b0.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+                    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     VkDescriptorSetLayoutBinding b1{};  // output image
     b1.binding = 1; b1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     b1.descriptorCount = 1; b1.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
@@ -813,8 +820,9 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
                  RtxPipelineCache* cache,
                  const std::vector<std::uint32_t>& rgen,
                  const std::vector<std::vector<std::uint32_t>>& rint_per_group,
-                 const std::vector<std::uint32_t>& rchit,
+                 const std::vector<std::vector<std::uint32_t>>& rchit_per_group,
                  const std::vector<std::uint32_t>& rmiss,
+                 const std::vector<std::uint32_t>& rmiss_shadow,
                  const RtPushConstants& pc, int width, int height) {
     auto dev = ctx.device();
     using clk = std::chrono::steady_clock;
@@ -839,9 +847,11 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
             want_key ^= v.size(); want_key *= 1099511628211ull;
             for (std::uint32_t w : v) { want_key ^= w; want_key *= 1099511628211ull; }
         };
-        mix(rgen); mix(rchit); mix(rmiss);
+        mix(rgen); mix(rmiss); mix(rmiss_shadow);
         want_key ^= ng; want_key *= 1099511628211ull;
         for (const auto& ri : rint_per_group) mix(ri);
+        want_key ^= rchit_per_group.size(); want_key *= 1099511628211ull;
+        for (const auto& rc : rchit_per_group) mix(rc);
     }
     const bool cache_hit = cache && cache->valid && cache->key == want_key;
     if (cache && cache->valid && cache->key != want_key) cache->release(ctx);
@@ -858,8 +868,20 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     const std::uint32_t halign = rtprops.shaderGroupHandleAlignment;
 
     // Objects shared between cache hit and fresh build.
-    VkShaderModule m_rgen = VK_NULL_HANDLE, m_rmiss = VK_NULL_HANDLE, m_rchit = VK_NULL_HANDLE;
+    // One closest-hit module per hit group on the instanced path (each emitted
+    // from its own prototype's field, so none of them grows with the scene);
+    // one shared module reused for every group on the per-group path.
+    const std::uint32_t nch = (std::uint32_t)rchit_per_group.size();
+    if (nch != 1 && nch != ng)
+        return std::unexpected("rtx_trace_groups: need one closest-hit shader, "
+                               "or one per group");
+    const bool shadow_miss = !rmiss_shadow.empty();
+    const std::uint32_t nmiss = shadow_miss ? 2u : 1u;
+
+    VkShaderModule m_rgen = VK_NULL_HANDLE, m_rmiss = VK_NULL_HANDLE;
+    VkShaderModule m_rmiss_sh = VK_NULL_HANDLE;
     std::vector<VkShaderModule> m_rint(ng, VK_NULL_HANDLE);
+    std::vector<VkShaderModule> m_rchit(nch, VK_NULL_HANDLE);
     VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
     VkPipelineLayout playout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -869,11 +891,13 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     VkDeviceSize hstride = 0, rgen_sz = 0, miss_sz = 0, hit_sz = 0;
 
     if (cache_hit) {
-        m_rgen  = (VkShaderModule)cache->shader_modules[0];
-        m_rchit = (VkShaderModule)cache->shader_modules[2];
-        m_rmiss = (VkShaderModule)cache->shader_modules[3];
+        m_rgen    = (VkShaderModule)cache->shader_modules[0];
+        m_rmiss   = (VkShaderModule)cache->shader_modules[3];
+        m_rmiss_sh = (VkShaderModule)cache->shader_modules[1];
         for (std::uint32_t i = 0; i < ng; ++i)
             m_rint[i] = (VkShaderModule)cache->group_rint_modules[i];
+        for (std::uint32_t i = 0; i < nch; ++i)
+            m_rchit[i] = (VkShaderModule)cache->group_rchit_modules[i];
         dsl      = (VkDescriptorSetLayout)cache->descriptor_layout;
         playout  = (VkPipelineLayout)cache->pipeline_layout;
         pipeline = (VkPipeline)cache->pipeline;
@@ -881,19 +905,24 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
         hsize    = cache->handle_size;
         hstride  = align_up(hsize, halign);
         rgen_sz  = align_up(hstride, balign);
-        miss_sz  = align_up(hstride, balign);
+        miss_sz  = align_up(hstride * nmiss, balign);
         hit_sz   = align_up(hstride * ng, balign);
     } else {
     // ── Shader modules: raygen, miss, closest-hit (shared) + N intersection ─
     m_rgen  = mk_module(dev, rgen);
     m_rmiss = mk_module(dev, rmiss);
-    m_rchit = mk_module(dev, rchit);
+    if (shadow_miss) m_rmiss_sh = mk_module(dev, rmiss_shadow);
     for (std::uint32_t i = 0; i < ng; ++i) m_rint[i] = mk_module(dev, rint_per_group[i]);
+    for (std::uint32_t i = 0; i < nch; ++i) m_rchit[i] = mk_module(dev, rchit_per_group[i]);
 
     // Descriptor layout (same as single-BLAS: TLAS + storage image).
     VkDescriptorSetLayoutBinding b0{};
     b0.binding = 0; b0.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    b0.descriptorCount = 1; b0.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    b0.descriptorCount = 1;
+    // Closest-hit reads the TLAS as well on the instanced path: its shadow ray
+    // is traced from there rather than marched over the field.
+    b0.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+                    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     VkDescriptorSetLayoutBinding b1{};
     b1.binding = 1; b1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     b1.descriptorCount = 1; b1.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
@@ -913,22 +942,30 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
     vkCreatePipelineLayout(dev, &plci, nullptr, &playout);
 
-    // Stages: [0]=rgen [1]=rmiss [2]=rchit [3..]=intersection per group.
-    std::vector<VkPipelineShaderStageCreateInfo> stages(3 + ng);
+    // Stages: [0]=rgen, [1..nmiss]=miss (primary, then the shadow ray's),
+    // then one closest-hit per distinct shader, then one intersection per group.
+    const std::uint32_t st_miss  = 1;
+    const std::uint32_t st_chit  = st_miss + nmiss;
+    const std::uint32_t st_isect = st_chit + nch;
+    std::vector<VkPipelineShaderStageCreateInfo> stages(st_isect + ng);
     auto st = [&](std::uint32_t idx, VkShaderStageFlagBits s, VkShaderModule m) {
         stages[idx] = {};
         stages[idx].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[idx].stage = s; stages[idx].module = m; stages[idx].pName = "main";
     };
-    st(0, VK_SHADER_STAGE_RAYGEN_BIT_KHR,      m_rgen);
-    st(1, VK_SHADER_STAGE_MISS_BIT_KHR,        m_rmiss);
-    st(2, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, m_rchit);
+    st(0, VK_SHADER_STAGE_RAYGEN_BIT_KHR, m_rgen);
+    st(st_miss, VK_SHADER_STAGE_MISS_BIT_KHR, m_rmiss);
+    if (shadow_miss) st(st_miss + 1, VK_SHADER_STAGE_MISS_BIT_KHR, m_rmiss_sh);
+    for (std::uint32_t i = 0; i < nch; ++i)
+        st(st_chit + i, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, m_rchit[i]);
     for (std::uint32_t i = 0; i < ng; ++i)
-        st(3 + i, VK_SHADER_STAGE_INTERSECTION_BIT_KHR, m_rint[i]);
+        st(st_isect + i, VK_SHADER_STAGE_INTERSECTION_BIT_KHR, m_rint[i]);
 
-    // Groups: [0]=raygen [1]=miss [2..]=one procedural hit group per group,
-    // each = shared closest-hit (stage 2) + that group's intersection (3+i).
-    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups(2 + ng);
+    // Groups: [0]=raygen, [1..nmiss]=miss, then one procedural hit group per
+    // group = that group's closest-hit (shared when there is only one) plus its
+    // own intersection shader.
+    const std::uint32_t gp_hit = 1 + nmiss;
+    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups(gp_hit + ng);
     for (auto& g : groups) {
         g = {};
         g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
@@ -939,19 +976,23 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     }
     groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
     groups[0].generalShader = 0;
-    groups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-    groups[1].generalShader = 1;
+    for (std::uint32_t i = 0; i < nmiss; ++i) {
+        groups[1 + i].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        groups[1 + i].generalShader = st_miss + i;
+    }
     for (std::uint32_t i = 0; i < ng; ++i) {
-        groups[2 + i].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
-        groups[2 + i].closestHitShader = 2;
-        groups[2 + i].intersectionShader = 3 + i;
+        groups[gp_hit + i].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
+        groups[gp_hit + i].closestHitShader = st_chit + (nch == 1 ? 0 : i);
+        groups[gp_hit + i].intersectionShader = st_isect + i;
     }
 
     VkRayTracingPipelineCreateInfoKHR rtci{};
     rtci.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
     rtci.stageCount = (std::uint32_t)stages.size(); rtci.pStages = stages.data();
     rtci.groupCount = (std::uint32_t)groups.size(); rtci.pGroups = groups.data();
-    rtci.maxPipelineRayRecursionDepth = 1;
+    // Depth 2 when closest-hit traces its own occlusion ray; 1 otherwise, so
+    // the per-group path asks the driver for no more than it did before.
+    rtci.maxPipelineRayRecursionDepth = shadow_miss ? 2 : 1;
     rtci.layout = playout;
     if (create_pipelines(dev, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &rtci,
                          nullptr, &pipeline) != VK_SUCCESS)
@@ -960,7 +1001,7 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     // ── SBT: raygen(1) + miss(1) + hit(N) records ───────────────────────────
     hsize   = rtprops.shaderGroupHandleSize;
     hstride = align_up(hsize, halign);
-    std::uint32_t total_groups = 2 + ng;
+    std::uint32_t total_groups = gp_hit + ng;
     std::vector<std::uint8_t> handles(hsize * total_groups);
     if (get_handles(dev, pipeline, 0, total_groups, handles.size(), handles.data())
             != VK_SUCCESS)
@@ -969,15 +1010,17 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     // Region layout: [raygen region][miss region][hit region]. Each region base-
     // aligned; the hit region holds ng records of hstride each.
     rgen_sz = align_up(hstride, balign);
-    miss_sz = align_up(hstride, balign);
+    miss_sz = align_up(hstride * nmiss, balign);
     hit_sz  = align_up(hstride * ng, balign);
     VkDeviceSize sbt_size = rgen_sz + miss_sz + hit_sz;
     std::vector<std::uint8_t> sbt_host((std::size_t)sbt_size, 0);
     std::memcpy(sbt_host.data(), handles.data() + hsize * 0, hsize);            // raygen
-    std::memcpy(sbt_host.data() + rgen_sz, handles.data() + hsize * 1, hsize);  // miss
+    for (std::uint32_t i = 0; i < nmiss; ++i)                                   // miss
+        std::memcpy(sbt_host.data() + rgen_sz + hstride * i,
+                    handles.data() + hsize * (1 + i), hsize);
     for (std::uint32_t i = 0; i < ng; ++i)                                      // hits
         std::memcpy(sbt_host.data() + rgen_sz + miss_sz + hstride * i,
-                    handles.data() + hsize * (2 + i), hsize);
+                    handles.data() + hsize * (gp_hit + i), hsize);
     auto sbt_built = mk_device_local_upload(
         ctx, sbt_host.data(), sbt_size,
         VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR);
@@ -992,12 +1035,15 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
         cache->pipeline_layout   = playout;
         cache->descriptor_layout = dsl;
         cache->shader_modules[0] = m_rgen;
-        cache->shader_modules[1] = nullptr;
-        cache->shader_modules[2] = m_rchit;
+        cache->shader_modules[1] = m_rmiss_sh;
+        cache->shader_modules[2] = nullptr;
         cache->shader_modules[3] = m_rmiss;
         cache->group_rint_modules.assign(ng, nullptr);
         for (std::uint32_t i = 0; i < ng; ++i)
             cache->group_rint_modules[i] = m_rint[i];
+        cache->group_rchit_modules.assign(nch, nullptr);
+        for (std::uint32_t i = 0; i < nch; ++i)
+            cache->group_rchit_modules[i] = m_rchit[i];
         cache->sbt_buffer  = sbt_built->buf;
         cache->sbt_memory  = sbt_built->mem;
         cache->sbt_base    = base;
@@ -1188,7 +1234,8 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
         vkDestroyDescriptorSetLayout(dev, dsl, nullptr);
         vkDestroyShaderModule(dev, m_rgen, nullptr);
         vkDestroyShaderModule(dev, m_rmiss, nullptr);
-        vkDestroyShaderModule(dev, m_rchit, nullptr);
+        if (m_rmiss_sh) vkDestroyShaderModule(dev, m_rmiss_sh, nullptr);
+        for (auto m : m_rchit) vkDestroyShaderModule(dev, m, nullptr);
         for (auto m : m_rint) vkDestroyShaderModule(dev, m, nullptr);
     }
 
@@ -1199,11 +1246,13 @@ std::expected<RtRenderResult, std::string>
 rtx_trace_groups(const RtxCtx& ctx, const RtAccel& accel,
                  const std::vector<std::uint32_t>& rgen,
                  const std::vector<std::vector<std::uint32_t>>& rint_per_group,
-                 const std::vector<std::uint32_t>& rchit,
+                 const std::vector<std::vector<std::uint32_t>>& rchit_per_group,
                  const std::vector<std::uint32_t>& rmiss,
+                 const std::vector<std::uint32_t>& rmiss_shadow,
                  const RtPushConstants& pc, int width, int height) {
     return rtx_trace_groups_impl(ctx, accel, nullptr, rgen, rint_per_group,
-                                 rchit, rmiss, pc, width, height);
+                                 rchit_per_group, rmiss, rmiss_shadow,
+                                 pc, width, height);
 }
 
 std::expected<RtRenderResult, std::string>
@@ -1211,11 +1260,13 @@ rtx_trace_groups_cached(const RtxCtx& ctx, const RtAccel& accel,
                         RtxPipelineCache& cache,
                         const std::vector<std::uint32_t>& rgen,
                         const std::vector<std::vector<std::uint32_t>>& rint_per_group,
-                        const std::vector<std::uint32_t>& rchit,
+                        const std::vector<std::vector<std::uint32_t>>& rchit_per_group,
                         const std::vector<std::uint32_t>& rmiss,
+                        const std::vector<std::uint32_t>& rmiss_shadow,
                         const RtPushConstants& pc, int width, int height) {
     return rtx_trace_groups_impl(ctx, accel, &cache, rgen, rint_per_group,
-                                 rchit, rmiss, pc, width, height);
+                                 rchit_per_group, rmiss, rmiss_shadow,
+                                 pc, width, height);
 }
 
 }  // namespace frep::gpu

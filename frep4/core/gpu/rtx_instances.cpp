@@ -120,19 +120,82 @@ void collect_members(const FRepNode::Ptr& n, std::vector<FRepNode::Ptr>& out) {
         out.push_back(n);
 }
 
+// Structural equality: same node kind, same parameters, same children, all the
+// way down. Node identity short-circuits it, which is the common case once
+// factor_instances has rewired copies to a shared pointer.
+//
+// This exists because a hash is not enough to decide sharing. Everywhere else
+// in the system a structural_hash collision costs a missed cache hit; here it
+// would make every copy of one shape render as another, and the failure is
+// silent and global rather than local. The id is deliberately excluded -- it is
+// per-placement bookkeeping, not geometry.
+bool structurally_equal(const FRepNode& a, const FRepNode& b) {
+    if (&a == &b) return true;
+    if (a.kind != b.kind) return false;
+    if (a.children.size() != b.children.size()) return false;
+    if (a.params.size() != b.params.size()) return false;
+    for (const auto& [k, v] : a.params) {
+        auto it = b.params.find(k);
+        if (it == b.params.end() || it->second != v) return false;
+    }
+    // Plugin and expression nodes carry state the base class cannot see
+    // (CustomExpr's source text, a plugin's own fields). Their type_name and
+    // structural_hash fold it in, so require both to agree before trusting the
+    // parameter comparison above.
+    if (std::strcmp(a.type_name(), b.type_name()) != 0) return false;
+    if (a.structural_hash() != b.structural_hash()) return false;
+    for (std::size_t i = 0; i < a.children.size(); ++i) {
+        if (!a.children[i] || !b.children[i]) {
+            if (a.children[i] != b.children[i]) return false;
+            continue;
+        }
+        if (!structurally_equal(*a.children[i], *b.children[i])) return false;
+    }
+    return true;
+}
+
+// A box the BLAS can actually prune with. FRepNode::AABB::infinite() is the
+// default for anything that cannot bound itself (a Plane, a CustomExpr with no
+// declared bounds), and a BLAS built over it is not an acceleration structure:
+// every ray enters every instance. On the per-group path that wastes one
+// object; shared across a thousand placements it would make the TLAS actively
+// harmful, so such a body is not eligible to be a prototype.
+bool bounded(const FRepNode::AABB& b) {
+    const float lim = 1e8f;   // infinite() uses 1e9
+    const float e[6] = {b.min_x, b.min_y, b.min_z, b.max_x, b.max_y, b.max_z};
+    for (float v : e) if (!(std::fabs(v) < lim)) return false;
+    return b.max_x >= b.min_x && b.max_y >= b.min_y && b.max_z >= b.min_z;
+}
+
 }  // namespace
 
-std::optional<RtInstancing> factor_rt_instances(const FRepNode::Ptr& root) {
-    if (!root) return std::nullopt;
-
+std::optional<RtInstancing> factor_rt_instances(const SceneGraph& scene) {
+    // Members with the material of the object each came from. The executor
+    // unions every visible object's geometry, so a member's material is the
+    // material of the object whose tree it was cut out of -- and since the
+    // closest-hit shader now shades from the prototype, that material has to
+    // travel with it rather than be looked up in the whole scene.
     std::vector<FRepNode::Ptr> members;
-    collect_members(root, members);
+    std::vector<const Material*> member_mat;
+    for (const auto& [id, obj] : scene.objects()) {
+        if (!obj.visible || !obj.geometry) continue;
+        std::size_t before = members.size();
+        collect_members(obj.geometry, members);
+        member_mat.resize(members.size(), &obj.material);
+        for (std::size_t i = before; i < members.size(); ++i)
+            member_mat[i] = &obj.material;
+    }
     if (members.size() < 2) return std::nullopt;
 
     RtInstancing out;
-    std::unordered_map<std::size_t, int> proto_of;   // shape hash -> prototype
+    // Candidate prototypes bucketed by hash; the hash only narrows the search,
+    // and structural equality decides. Buckets keep this near-linear without
+    // letting a collision merge two different shapes.
+    std::unordered_map<std::size_t, std::vector<int>> buckets;
 
-    for (const auto& m : members) {
+    for (std::size_t mi = 0; mi < members.size(); ++mi) {
+        const FRepNode::Ptr& m = members[mi];
+        const Material& mat = *member_mat[mi];
         // Walk down the affine chain, accumulating world->object. Each node's
         // map applies to the point its parent already produced, so the new node
         // composes *after* what we have: p_obj = T_k(...T_1(p_world)).
@@ -152,25 +215,31 @@ std::optional<RtInstancing> factor_rt_instances(const FRepNode::Ptr& root) {
                body->children.size() == 1 && body->children[0])
             body = body->children[0];
 
-        // A member we cannot place — a collapsed scale with no inverse, or an
-        // empty chain — becomes its own prototype at the identity, which is
-        // exactly what the per-group build would have done with it. One
-        // degenerate member must not cost the other thousand their sharing.
+        // A member we cannot place becomes its own prototype at the identity,
+        // which is exactly what the per-group build would have done with it.
+        // One awkward member must not cost the other thousand their sharing.
+        // Three ways to land here: a collapsed scale with no inverse, an empty
+        // chain, and a body that cannot bound itself -- the last because a BLAS
+        // over an infinite box prunes nothing, and shared across every
+        // placement that would be worse than not instancing at all.
         Affine o2w;
-        if (!body || !invert(w2o, o2w)) {
+        if (!body || !invert(w2o, o2w) || !bounded(body->aabb())) {
             body = m;
             o2w  = Affine{};
         }
 
+        // Hash to narrow, structural equality + material to decide.
         std::size_t h = body->structural_hash();
-        auto it = proto_of.find(h);
-        int pi;
-        if (it == proto_of.end()) {
+        auto& bucket = buckets[h];
+        int pi = -1;
+        for (int cand : bucket) {
+            if (out.protos[cand].material == mat &&
+                structurally_equal(*out.protos[cand].body, *body)) { pi = cand; break; }
+        }
+        if (pi < 0) {
             pi = (int)out.protos.size();
-            proto_of.emplace(h, pi);
-            out.protos.push_back(RtProto{body, body->aabb()});
-        } else {
-            pi = it->second;
+            bucket.push_back(pi);
+            out.protos.push_back(RtProto{body, body->aabb(), mat});
         }
 
         RtInstanceXform x;
@@ -196,7 +265,7 @@ std::vector<SceneGraph> make_proto_scenes(const SceneGraph& full,
     scenes.reserve(inst.protos.size());
     for (const auto& p : inst.protos) {
         SceneGraph s;
-        s.add_object(p.body);
+        s.add_object(p.body, p.material);   // material is part of the prototype
         s.templates() = full.templates();   // bodies may call frep_tmpl_* helpers
         scenes.push_back(std::move(s));
     }

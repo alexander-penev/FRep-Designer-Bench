@@ -38,12 +38,21 @@ int main(int argc, char** argv) {
     std::string paths = "cpu_ir,gpu_rtx";
     int R = 512;
     double tol = 2.0 / 255.0;
+    // Shading toggles, so a divergence can be attributed. The instanced RT
+    // build changes where shadows and ambient occlusion get their answer from,
+    // and those are the two terms that read the whole scene rather than the
+    // shape that was hit.
+    bool no_shadows = false, no_ao = false;
+    int shadow_samples = -1;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](const char* d) { return i + 1 < argc ? argv[++i] : d; };
         if      (a == "--paths")     paths = next("cpu_ir,gpu_rtx");
         else if (a == "--res")       R = std::atoi(next("512"));
         else if (a == "--tolerance") tol = std::atof(next("0.0078"));
+        else if (a == "--no-shadows")  no_shadows = true;
+        else if (a == "--no-ao")       no_ao = true;
+        else if (a == "--shadow-samples") shadow_samples = std::atoi(next("1"));
     }
     auto comma = paths.find(',');
     if (comma == std::string::npos) {
@@ -60,6 +69,9 @@ int main(int argc, char** argv) {
     }
 
     TracerConfig cfg;
+    if (no_shadows) cfg.enable_shadows = false;
+    if (no_ao)      cfg.enable_ao = false;
+    if (shadow_samples > 0) cfg.shadow_samples = shadow_samples;
     auto ea = make_executor(pa, cfg), eb = make_executor(pb, cfg);
     if (!ea || !eb) { std::fprintf(stderr, "unknown path in '%s'\n", paths.c_str()); return 1; }
     if (!ea->available()) { std::fprintf(stderr, "%s unavailable\n", pa.c_str()); return 1; }

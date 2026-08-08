@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
                 const char* v = std::getenv("FREP_RTX_NO_INSTANCING");
                 return v && v[0] == '1';
             }();
-            auto inst = no_inst ? std::nullopt : gpu::factor_rt_instances(root);
+            auto inst = no_inst ? std::nullopt : gpu::factor_rt_instances(scene);
 
             // Scenes to emit an intersection shader from: one per prototype on
             // the instanced path, one per group otherwise.
@@ -227,12 +227,27 @@ int main(int argc, char** argv) {
             n_shaders = (int)gscenes.size();
 
             auto rgen  = compile_stage(sh->rgen,  "rgen",  err); if (!err.empty()) break;
-            auto rchit = compile_stage(sh->rchit, "rchit", err); if (!err.empty()) break;
             auto rmiss = compile_stage(sh->rmiss, "rmiss", err); if (!err.empty()) break;
+            std::vector<std::uint32_t> rmiss_shadow;
+            if (!sh->rmiss_shadow.empty()) {
+                rmiss_shadow = compile_stage(sh->rmiss_shadow, "rmiss", err);
+                if (!err.empty()) break;
+            }
             std::vector<std::vector<std::uint32_t>> rints;
             for (auto& src : sh->rint_per_group) {
                 rints.push_back(compile_stage(src, "rint", err));
                 if (!err.empty()) break;
+            }
+            if (!err.empty()) break;
+            // Instanced: one closest-hit per prototype. Per-group: one shared.
+            std::vector<std::vector<std::uint32_t>> rchits;
+            if (sh->rchit_per_group.empty()) {
+                rchits.push_back(compile_stage(sh->rchit, "rchit", err));
+            } else {
+                for (auto& src : sh->rchit_per_group) {
+                    rchits.push_back(compile_stage(src, "rchit", err));
+                    if (!err.empty()) break;
+                }
             }
             if (!err.empty()) break;
             // SPIR-V sizes, because "the build is slow" is not a diagnosis. The
@@ -242,12 +257,13 @@ int main(int argc, char** argv) {
             // stage, which still evaluates the WHOLE scene for the normal, the
             // albedo and the shadow ray.
             if (verbose) {
-                std::size_t rint_words = 0;
+                std::size_t rint_words = 0, rchit_words = 0;
                 for (auto& r : rints) rint_words += r.size();
+                for (auto& r : rchits) rchit_words += r.size();
                 std::fprintf(stderr,
-                    "  [n=%d] spirv words: rgen %zu  rchit %zu  rmiss %zu  "
-                    "rint x%zu = %zu\n", n, rgen.size(), rchit.size(),
-                    rmiss.size(), rints.size(), rint_words);
+                    "  [n=%d] spirv words: rgen %zu  rchit x%zu = %zu  rmiss %zu  "
+                    "rint x%zu = %zu\n", n, rgen.size(), rchits.size(),
+                    rchit_words, rmiss.size(), rints.size(), rint_words);
             }
 
             // Boxes → multi-BLAS. On the instanced path they are the
@@ -295,8 +311,9 @@ int main(int argc, char** argv) {
 
             for (int w = 0; w < 2; ++w) {   // warm both devices and the cache
                 cpu.render(scene, W, H, exec::Tile{0, 0, W, H});
-                auto wi = gpu::rtx_trace_groups_cached(*ctx, *accel, pcache,
-                                                       rgen, rints, rchit, rmiss, pc, W, H);
+                auto wi = gpu::rtx_trace_groups_cached(*ctx, *accel, pcache, rgen,
+                                                       rints, rchits, rmiss,
+                                                       rmiss_shadow, pc, W, H);
                 if (!wi) { err = wi.error(); break; }
                 if (w == 0) rtx_build_ms = wi->pipeline_ms;   // the cold build
             }
@@ -312,7 +329,8 @@ int main(int argc, char** argv) {
                 });
                 if (!burst([&] {
                         auto im = gpu::rtx_trace_groups_cached(
-                            *ctx, *accel, pcache, rgen, rints, rchit, rmiss, pc, W, H);
+                            *ctx, *accel, pcache, rgen, rints, rchits, rmiss,
+                            rmiss_shadow, pc, W, H);
                         if (!im) { err = im.error(); return false; }
                         rtx_s.push_back(im->trace_ms);
                         return true;

@@ -501,7 +501,12 @@ RtAccel::build_instanced(const RtxCtx& ctx, const std::vector<RtAabb>& proto_box
             // VkTransformMatrixKHR is row-major 3x4 and RtInstanceXform stores
             // it in exactly that order, so this is a straight copy.
             std::memcpy(&inst.transform.matrix[0][0], px.m, sizeof(px.m));
-            inst.instanceCustomIndex = i;
+            // The custom index names the PROTOTYPE, not the placement. A
+            // shadow ray query walks candidate boxes without a hit group, so
+            // this is the only way a shader can tell which shape it is being
+            // asked to intersect -- and it must be the prototype, or the switch
+            // would have one arm per copy and we would be back where we started.
+            inst.instanceCustomIndex = px.blas;
             inst.mask = 0xFF;
             // The hit record is per *prototype*: every placement of a shape
             // runs that shape's one intersection shader.

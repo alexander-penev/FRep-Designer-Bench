@@ -113,7 +113,7 @@ public:
             };
 
             rgen_.clear(); rint_.clear(); rchit_.clear(); rmiss_.clear();
-            rints_group_.clear();
+            rints_group_.clear(); rchits_group_.clear(); rmiss_shadow_.clear();
             group_mode_ = false;
             inst_protos_ = inst_places_ = 0;
 
@@ -141,16 +141,23 @@ public:
                 return v && v[0] == '1';
             }();
             if (!no_inst && groups.size() > 1) {
-                if (auto inst = gpu::factor_rt_instances(root)) {
+                if (auto inst = gpu::factor_rt_instances(scene)) {
                     auto pscenes = gpu::make_proto_scenes(scene, *inst);
                     auto gs = gpu::emit_rt_instanced_shaders(scene, pscenes, cfg_);
                     if (gs) {
                         std::string err = compile(gs->rgen, "rgen", rgen_);
-                        if (err.empty()) err = compile(gs->rchit, "rchit", rchit_);
                         if (err.empty()) err = compile(gs->rmiss, "rmiss", rmiss_);
+                        if (err.empty() && !gs->rmiss_shadow.empty())
+                            err = compile(gs->rmiss_shadow, "rmiss", rmiss_shadow_);
                         rints_group_.resize(gs->rint_per_group.size());
                         for (std::size_t i = 0; err.empty() && i < rints_group_.size(); ++i)
                             err = compile(gs->rint_per_group[i], "rint", rints_group_[i]);
+                        // One closest-hit per prototype: each is emitted from
+                        // that prototype's own field, which is what stops the
+                        // stage growing with the object count.
+                        rchits_group_.resize(gs->rchit_per_group.size());
+                        for (std::size_t i = 0; err.empty() && i < rchits_group_.size(); ++i)
+                            err = compile(gs->rchit_per_group[i], "rchit", rchits_group_[i]);
                         if (err.empty()) {
                             // Boxes are the prototypes' OWN bounds; the margin is
                             // object-space too, and the instance transform carries
@@ -174,7 +181,8 @@ public:
                     }
                     if (!group_mode_) {   // instanced build failed → try groups
                         rgen_.clear(); rchit_.clear(); rmiss_.clear();
-                        rints_group_.clear();
+                        rints_group_.clear(); rchits_group_.clear();
+                        rmiss_shadow_.clear();
                         inst_protos_ = inst_places_ = 0;
                     }
                 }
@@ -197,6 +205,7 @@ public:
                     for (std::size_t i = 0; err.empty() && i < rints_group_.size(); ++i)
                         err = compile(gs->rint_per_group[i], "rint", rints_group_[i]);
                     if (err.empty()) {
+                        rchits_group_.assign(1, rchit_);   // one shader, every group
                         std::vector<gpu::RtAabb> boxes;
                         const float m = 0.05f;
                         for (auto& g : groups)
@@ -212,7 +221,8 @@ public:
                     }
                 }
                 if (!group_mode_) {  // group path failed → clean up, use single
-                    rgen_.clear(); rchit_.clear(); rmiss_.clear(); rints_group_.clear();
+                    rgen_.clear(); rchit_.clear(); rmiss_.clear();
+                    rints_group_.clear(); rchits_group_.clear();
                 }
             }
 
@@ -252,8 +262,8 @@ public:
         //    interactive camera move pays only the trace.
         auto img = group_mode_
             ? gpu::rtx_trace_groups_cached(*ctx_, *accel_, cache_,
-                                           rgen_, rints_group_, rchit_, rmiss_,
-                                           pc, W, H)
+                                           rgen_, rints_group_, rchits_group_,
+                                           rmiss_, rmiss_shadow_, pc, W, H)
             : gpu::rtx_trace_cached(*ctx_, *accel_, cache_,
                                     rgen_, rint_, rchit_, rmiss_,
                                     pc, W, H, tex_pixels_, mesh_voxels_);
@@ -353,6 +363,10 @@ private:
     gpu::RtxPipelineCache          cache_;
     std::vector<std::uint32_t>     rgen_, rint_, rchit_, rmiss_;
     std::vector<std::vector<std::uint32_t>> rints_group_;  // per-group rint SPIR-V
+    // Per-prototype closest-hit SPIR-V on the instanced path; a single entry
+    // (the whole-scene shader) on the per-group path.
+    std::vector<std::vector<std::uint32_t>> rchits_group_;
+    std::vector<std::uint32_t>     rmiss_shadow_;  // occlusion-ray miss, instanced only
     bool                           group_mode_ = false;    // multi-BLAS this scene
     // Non-zero when the multi-BLAS build came from shared prototypes rather
     // than one-BLAS-per-member; the ratio is what the instancing bought.

@@ -105,14 +105,31 @@ std::string lift_push_block(const std::string& comp_src, std::string& error) {
 //
 // For a rigid placement (translation and rotation, the common case) the factor
 // is exactly one and the arithmetic reduces to the world-space form.
+//
+// Object-space mode also carries the surface NORMAL out through the hit
+// attribute, which is not an optimisation of this shader but of the next one.
+// The closest-hit stage needs a normal, and taking it from the whole scene's
+// field means differentiating the whole scene: at 256 instances that single
+// call is 152k of the closest-hit shader's 194k SPIR-V words, because the
+// analytic-gradient form carries a dual number through every term. Here the
+// prototype's field is already inlined and already being marched, so the
+// gradient is bounded by the prototype and costs a few more evaluations of
+// something small. Attribute storage is 24 bytes against a 32-byte device
+// limit.
 inline std::string emit_intersection(const char* hdr, const std::string& push,
                                      const std::string& shared,
                                      const TracerConfig& cfg,
                                      bool object_space = false) {
     std::ostringstream s;
-    s << hdr << push << shared
-      << "hitAttributeEXT vec3 hit_pos;\n"
-      << "void main() {\n";
+    s << hdr << push << shared;
+    if (object_space)
+        // Not named `hit`: the march below already has a local `bool hit`,
+        // and the shadowed name turns hit.pos into a swizzle of a boolean.
+        s << "struct RtHit { vec3 pos; vec3 nrm; };\n"
+          << "hitAttributeEXT RtHit hit_attr;\n";
+    else
+        s << "hitAttributeEXT vec3 hit_pos;\n";
+    s << "void main() {\n";
     if (object_space) {
         s << "    vec3 ro = gl_ObjectRayOriginEXT;\n"
           << "    vec3 rd = gl_ObjectRayDirectionEXT;   // unnormalised: |rd| = object units per world unit\n"
@@ -161,18 +178,136 @@ inline std::string emit_intersection(const char* hdr, const std::string& push,
       << "        last_d = d;\n"
       << "        t += step_len * dt_per_d;\n"
       << "    }\n"
-      << "    if (!hit && t <= tmax && last_d < eps * 80.0) hit = true;\n"
-      // The closest-hit shader shades against the FULL scene in world space, so
-      // the attribute it reads has to be a world point even when the march ran
-      // in object space. t is the same parameter in both, so the world point is
-      // just the world ray evaluated at it.
-      << "    if (hit) {\n"
-      << "        hit_pos = " << (object_space
-             ? "gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * t"
-             : "p") << ";\n"
-      << "        reportIntersectionEXT(t, 0u);\n"
-      << "    }\n"
+      << "    if (!hit && t <= tmax && last_d < eps * 80.0) hit = true;\n";
+    // The closest-hit shader shades in world space, so the position attribute
+    // has to be a world point even when the march ran in object space. t is the
+    // same parameter in both, so the world point is just the world ray
+    // evaluated at it.
+    if (object_space)
+        s << "    if (hit) {\n"
+          << "        hit_attr.pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * t;\n"
+          << "        hit_attr.nrm = scene_normal(p);   // object space; rotated to world by closest-hit\n"
+          << "        reportIntersectionEXT(t, 0u);\n"
+          << "    }\n";
+    else
+        s << "    if (hit) { hit_pos = p; reportIntersectionEXT(t, 0u); }\n";
+    s << "}\n";
+    return s.str();
+}
+
+// Swap the body of a function out of emitted GLSL, keeping its signature. Used
+// to redirect the shadow march at the acceleration structure. The alternative
+// -- an emitter option threaded through TracerConfig -- would put a
+// ray-tracing concern inside the compute emitter, which nothing else there
+// knows about. `signature` must be the exact emitted prototype line; a miss
+// returns false rather than silently leaving the original in place, because a
+// silently unpatched shadow march would still *work*, just at O(N), and the
+// whole point is that it must not.
+bool replace_function_body(std::string& src, const std::string& signature,
+                           const std::string& body) {
+    std::size_t at = src.find(signature);
+    if (at == std::string::npos) return false;
+    std::size_t open = src.find('{', at + signature.size() - 1);
+    if (open == std::string::npos) return false;
+    int depth = 0;
+    std::size_t i = open;
+    for (; i < src.size(); ++i) {
+        if (src[i] == '{') ++depth;
+        else if (src[i] == '}') { if (--depth == 0) break; }
+    }
+    if (i >= src.size()) return false;
+    src.replace(open + 1, i - open - 1, "\n" + body);
+    return true;
+}
+
+// Closest-hit for the instanced path, in two forms.
+//
+// Both take the surface normal from the hit attribute rather than
+// differentiating the scene, because the intersection shader already
+// differentiated the prototype it hit. That alone is most of the stage: the
+// analytic-gradient form carries a dual number through every term, so at 256
+// instances one scene_normal call was 152k of 194k SPIR-V words. It is exact --
+// near a hit on instance i the union's gradient IS instance i's gradient.
+//
+// The BOUNDED form goes further and is emitted from the prototype's field, so
+// albedo and roughness come from the prototype's own material (which is why
+// factoring makes material part of a prototype's identity) and nothing in the
+// stage grows with the object count. Shadows then cannot be local -- a column
+// must shadow its neighbour -- so the emitted shadow march is replaced by a
+// second ray through the acceleration structure, which stops at the first hit
+// and skips shading.
+//
+// That substitution is only legitimate when the shadow being replaced is a
+// visibility test. With shadow_samples > 1 the emitter already writes a binary
+// per-sample test and the softness comes from sampling the light's disk, so a
+// first-hit ray is exactly equivalent. With a single sample it writes Inigo
+// Quilez's penumbra estimate instead, which reads the *distance* to the nearest
+// surface along the ray -- something no first-hit query returns. Measured, the
+// substitution costs 4.5% of pixels beyond tolerance on a mixed scene, so the
+// caller only asks for the bounded form when the shadow model permits it.
+//
+// Ambient occlusion is the residual approximation in the bounded form: it too
+// wants a distance rather than a yes/no answer, and here it reads the
+// prototype's field, so a copy standing very close to another will not darken
+// the crease between them. Measured at 1.7% of pixels on the same scene.
+inline std::string emit_instanced_closest_hit(const char* hdr,
+                                              const std::string& push,
+                                              const std::string& proto_shared,
+                                              bool redirect_shadow,
+                                              std::string& error) {
+    std::string shared = proto_shared;
+    if (redirect_shadow) {
+        const std::string sig = "float _shadow_ray(vec3 origin, vec3 dir, float max_t)";
+        const std::string body =
+            "    // Occlusion through the TLAS instead of a march over the whole\n"
+            "    // field. TerminateOnFirstHit stops at the first occluder and\n"
+            "    // SkipClosestHit means no shading runs for it; the payload is\n"
+            "    // seeded blocked and only the shadow miss shader clears it.\n"
+            "    _shadow_vis = 0.0;\n"
+            "    traceRayEXT(tlas, gl_RayFlagsOpaqueEXT\n"
+            "                    | gl_RayFlagsTerminateOnFirstHitEXT\n"
+            "                    | gl_RayFlagsSkipClosestHitShaderEXT,\n"
+            "                0xFF, 0, 0, 1, origin, 0.001, dir, max_t, 1);\n"
+            "    return _shadow_vis;\n";
+        if (!replace_function_body(shared, sig, body)) {
+            error = "rtx_shaders: could not redirect _shadow_ray at the TLAS";
+            return {};
+        }
+    }
+
+    std::ostringstream s;
+    s << hdr
+      << push;
+    // Declared before the lifted region, which references both, and only when
+    // the shadow march was actually redirected -- an unused acceleration
+    // structure binding would still have to be declared and written.
+    if (redirect_shadow)
+        s << "layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;\n"
+          << "layout(location = 1) rayPayloadEXT float _shadow_vis;\n";
+    s << shared
+      << "layout(location = 0) rayPayloadInEXT vec3 prd;\n"
+      << "struct RtHit { vec3 pos; vec3 nrm; };\n"
+      << "hitAttributeEXT RtHit hit_attr;\n"
+      << "void main() {\n"
+      << "    vec3 p = hit_attr.pos;\n"
+      << "    // A normal transforms by the inverse transpose of object->world.\n"
+      << "    // gl_WorldToObjectEXT IS that inverse, so multiplying the normal\n"
+      << "    // on the LEFT by it applies the transpose: n * M == transpose(M) * n.\n"
+      << "    vec3 n = hit_attr.nrm * mat3(gl_WorldToObjectEXT);\n"
+      << "    float nl = length(n);\n"
+      << "    n = nl > 1e-20 ? n / nl : vec3(0.0, 1.0, 0.0);\n"
+      << "    prd = shade(p, n, -gl_WorldRayDirectionEXT);\n"
       << "}\n";
+    return s.str();
+}
+
+// Miss shader for the shadow ray. Reached only when nothing was hit between the
+// surface and the light, which is exactly the definition of unoccluded.
+inline std::string emit_shadow_miss(const char* hdr) {
+    std::ostringstream s;
+    s << hdr
+      << "layout(location = 1) rayPayloadInEXT float _shadow_vis;\n"
+      << "void main() { _shadow_vis = 1.0; }\n";
     return s.str();
 }
 
@@ -348,12 +483,36 @@ emit_rt_per_group(const SceneGraph& full_scene,
     auto base = emit_rt_shaders(full_scene, cfg);
     if (!base) return std::unexpected(base.error());
     out.rgen  = base->rgen;
-    out.rchit = base->rchit;
     out.rmiss = base->rmiss;
+    // The per-group path keeps one closest-hit stage over the whole scene. The
+    // instanced path emits one per prototype below, from the prototype's own
+    // field, and needs a second miss shader for the occlusion ray those use.
+    // Whether the closest-hit stage can be emitted from the prototype's field
+    // instead of the scene's. It can only when the shadow term is a visibility
+    // test -- off, or multi-sampled, where the emitter already writes a binary
+    // per-sample march. A single-sample soft shadow is a distance estimate and
+    // no first-hit ray reproduces it, so that config keeps a whole-scene stage
+    // (still without the scene gradient, which the hit attribute now carries).
+    const bool redirect_shadow = object_space && cfg.enable_shadows &&
+                                 cfg.shadow_samples > 1;
+    const bool bounded_chit = object_space &&
+                              (!cfg.enable_shadows || cfg.shadow_samples > 1);
+    out.rchit = object_space ? std::string{} : base->rchit;
+    if (redirect_shadow) out.rmiss_shadow = emit_shadow_miss(hdr);
+
+    // Not bounded: one whole-scene closest-hit, shared by every hit group.
+    if (object_space && !bounded_chit) {
+        std::string cerr;
+        std::string ch = emit_instanced_closest_hit(hdr, push, full_shared,
+                                                    /*redirect_shadow=*/false, cerr);
+        if (!cerr.empty()) return std::unexpected(cerr);
+        out.rchit_per_group.push_back(std::move(ch));
+    }
 
     // One intersection shader per group, each lifted from that group's own
     // scene so it sphere-traces ONLY that group's sub-tree SDF.
     out.rint_per_group.reserve(group_scenes.size());
+    if (bounded_chit) out.rchit_per_group.reserve(group_scenes.size());
     for (std::size_t i = 0; i < group_scenes.size(); ++i) {
         auto g = GlslEmitter::emit(group_scenes[i], cfg);
         if (!g) return std::unexpected("rtx_shaders(group " + std::to_string(i) +
@@ -367,6 +526,14 @@ emit_rt_per_group(const SceneGraph& full_scene,
         // the full scene's; the group only changes scene_sdf.
         out.rint_per_group.push_back(
             emit_intersection(hdr, push, gshared, cfg, object_space));
+        if (bounded_chit) {
+            std::string cerr;
+            std::string ch = emit_instanced_closest_hit(hdr, push, gshared,
+                                                        redirect_shadow, cerr);
+            if (!cerr.empty())
+                return std::unexpected(cerr + " (prototype " + std::to_string(i) + ")");
+            out.rchit_per_group.push_back(std::move(ch));
+        }
     }
     return out;
 }

@@ -45,10 +45,15 @@
 namespace frep::gpu {
 
 // One shared shape: a sub-tree in its own object space, plus its object-space
-// bounds. `body` is what the prototype's intersection shader sphere-traces.
+// bounds. `body` is what the prototype's intersection shader sphere-traces, and
+// `material` is the material of the scene object the copies came from -- part
+// of the prototype's identity, not decoration, because the closest-hit shader
+// now reads albedo and roughness from the prototype rather than from the whole
+// scene. Two identical shapes wearing different materials are two prototypes.
 struct RtProto {
     FRepNode::Ptr  body;
     FRepNode::AABB box;
+    Material       material;
 };
 
 // The factoring of a scene root into prototypes + placements. `placements[i]`
@@ -58,15 +63,24 @@ struct RtInstancing {
     std::vector<RtInstanceXform>  placements;
 };
 
-// Factor a scene root into shared prototypes and TLAS placements.
+// Factor a scene into shared prototypes and TLAS placements. Members come from
+// every visible object's geometry, in the order the executor unions them, so a
+// member's material is known and travels with its prototype.
+//
+// Two members share a prototype only when their bodies are structurally EQUAL
+// -- same kind, same parameters, same children, recursively -- and wear the
+// same material. A hash alone would be a silent correctness hazard here: one
+// collision does not misdraw one object, it repaints every copy of it.
 //
 // Returns nullopt when instancing would buy nothing — fewer than two members,
 // or every member a distinct shape (protos.size() == placements.size()), in
 // which case the caller should use the plain multi-BLAS group path, which is
 // the same construction with the transforms left in the shaders.
-std::optional<RtInstancing> factor_rt_instances(const FRepNode::Ptr& root);
+std::optional<RtInstancing> factor_rt_instances(const SceneGraph& scene);
 
-// Wrap each prototype body in a SceneGraph so GlslEmitter can emit its SDF.
+// Wrap each prototype body in a SceneGraph so GlslEmitter can emit its SDF,
+// carrying the prototype's material so the emitted albedo / roughness /
+// metallic match what the whole-scene emitter produces at the same points.
 // `full` supplies the template definitions the bodies may reference.
 std::vector<SceneGraph> make_proto_scenes(const SceneGraph& full,
                                           const RtInstancing& inst);

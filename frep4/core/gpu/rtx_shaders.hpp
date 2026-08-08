@@ -66,10 +66,18 @@ emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg = {});
 // are never sphere-traced at all.
 struct RtGroupShaderSet {
     std::string rgen;                       // shared
-    std::string rchit;                      // shared
+    std::string rchit;                      // shared (per-group path)
     std::string rmiss;                      // shared
     std::vector<std::string> rint_per_group; // one intersection shader / group
     std::string shared_glsl;                // diagnostics
+
+    // Instanced path only. The closest-hit stage is emitted per prototype from
+    // that prototype's own field, so it does not grow with the object count;
+    // `rchit` above is left empty in that case. `rmiss_shadow` answers the
+    // second ray type those shaders trace for occlusion — empty when shadows
+    // are off, in which case no second miss record is needed.
+    std::vector<std::string> rchit_per_group;
+    std::string rmiss_shadow;
 };
 
 // Emit per-group shaders. `group_scenes[i]` is a SceneGraph holding only group

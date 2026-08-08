@@ -80,12 +80,19 @@ rtx_trace(const RtxCtx& ctx, const RtAccel& accel,
 // instance i (SBT offset i) runs its own intersection shader. raygen/closest-
 // hit/miss are shared. This is the path where RT broad-phase culls groups a ray
 // misses, so it should scale far better than the O(N) flat-union compute path.
+// `rchit_per_group` holds either one shader (shared by every group, the
+// per-group path) or one per group (the instanced path, where each is emitted
+// from its own prototype and so does not grow with the scene). `rmiss_shadow`
+// is the miss shader for the occlusion ray those per-prototype shaders trace;
+// pass it empty when they do not, and the pipeline keeps a single miss record
+// and a recursion depth of one.
 std::expected<RtRenderResult, std::string>
 rtx_trace_groups(const RtxCtx& ctx, const RtAccel& accel,
                  const std::vector<std::uint32_t>& rgen,
                  const std::vector<std::vector<std::uint32_t>>& rint_per_group,
-                 const std::vector<std::uint32_t>& rchit,
+                 const std::vector<std::vector<std::uint32_t>>& rchit_per_group,
                  const std::vector<std::uint32_t>& rmiss,
+                 const std::vector<std::uint32_t>& rmiss_shadow,
                  const RtPushConstants& pc, int width, int height);
 
 // Amortized RT setup across frames. Creating shader modules + the ray-tracing
@@ -107,6 +114,10 @@ struct RtxPipelineCache {
     void*        descriptor_layout = nullptr; // VkDescriptorSetLayout
     void*        shader_modules[4] = {nullptr, nullptr, nullptr, nullptr};
     std::vector<void*> group_rint_modules;  // multi-BLAS: one VkShaderModule per group
+    // Instanced path: one closest-hit module per prototype (each emitted from
+    // that prototype's field). Holds a single entry on the per-group path,
+    // where one whole-scene closest-hit serves every group.
+    std::vector<void*> group_rchit_modules;
     void*        sbt_buffer = nullptr;      // VkBuffer
     void*        sbt_memory = nullptr;      // VkDeviceMemory
     std::uint64_t sbt_base = 0;             // VkDeviceAddress of SBT
@@ -170,8 +181,9 @@ rtx_trace_groups_cached(const RtxCtx& ctx, const RtAccel& accel,
                         RtxPipelineCache& cache,
                         const std::vector<std::uint32_t>& rgen,
                         const std::vector<std::vector<std::uint32_t>>& rint_per_group,
-                        const std::vector<std::uint32_t>& rchit,
+                        const std::vector<std::vector<std::uint32_t>>& rchit_per_group,
                         const std::vector<std::uint32_t>& rmiss,
+                        const std::vector<std::uint32_t>& rmiss_shadow,
                         const RtPushConstants& pc, int width, int height);
 
 }  // namespace frep::gpu
