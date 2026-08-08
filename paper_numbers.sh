@@ -45,9 +45,23 @@ provenance() {
 }
 
 # ── Render cost per path, one resolution (the cross-system render table) ──────
+#
+# Two shading levels, because the cross-system table is otherwise not
+# like-for-like. libfive's Heightmap::render and mpr's render3D produce depth
+# plus a surface normal and stop; our default also runs a shadow march, five
+# ambient-occlusion samples and a specular term at every hit, each of which is
+# another evaluation of the whole field. render_512.csv is the matched level
+# (what the other systems compute) and is what the comparison table reports;
+# render_512_full.csv is the shading model the application ships with, and the
+# difference between them is the price of that model.
 do_render() {
     need frep4_pathcost
     f="$OUT/render_512.csv"; provenance "$f"; echo "$HDR,build_ms,run_ms" >> "$f"
+    for s in $SCENES; do
+        "$BIN/frep4_pathcost" "scenes/frep4/$s.json" 512 --geometry 2>>"$f" >/dev/null
+    done
+    echo "-> $f"
+    f="$OUT/render_512_full.csv"; provenance "$f"; echo "$HDR,build_ms,run_ms" >> "$f"
     for s in $SCENES; do
         "$BIN/frep4_pathcost" "scenes/frep4/$s.json" 512 2>>"$f" >/dev/null
     done

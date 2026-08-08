@@ -116,13 +116,22 @@ std::string lift_push_block(const std::string& comp_src, std::string& error) {
 // gradient is bounded by the prototype and costs a few more evaluations of
 // something small. Attribute storage is 24 bytes against a 32-byte device
 // limit.
+//
+// `carry_normal` is independent of `object_space`: the per-group path benefits
+// from it too, and for the same reason. Its intersection shader marches the
+// group's own sub-tree, so the gradient it can produce is the group's, and near
+// a hit on group i the union's gradient IS group i's -- exactly the argument
+// that makes the instanced case exact. Applying it to both is also what lets
+// the two constructions be compared on instancing alone rather than on
+// instancing plus this.
 inline std::string emit_intersection(const char* hdr, const std::string& push,
                                      const std::string& shared,
                                      const TracerConfig& cfg,
-                                     bool object_space = false) {
+                                     bool object_space = false,
+                                     bool carry_normal = false) {
     std::ostringstream s;
     s << hdr << push << shared;
-    if (object_space)
+    if (carry_normal)
         // Not named `hit`: the march below already has a local `bool hit`,
         // and the shadowed name turns hit.pos into a swizzle of a boolean.
         s << "struct RtHit { vec3 pos; vec3 nrm; };\n"
@@ -183,10 +192,12 @@ inline std::string emit_intersection(const char* hdr, const std::string& push,
     // has to be a world point even when the march ran in object space. t is the
     // same parameter in both, so the world point is just the world ray
     // evaluated at it.
-    if (object_space)
+    if (carry_normal)
         s << "    if (hit) {\n"
-          << "        hit_attr.pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * t;\n"
-          << "        hit_attr.nrm = scene_normal(p);   // object space; rotated to world by closest-hit\n"
+          << "        hit_attr.pos = " << (object_space
+                 ? "gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * t"
+                 : "p") << ";\n"
+          << "        hit_attr.nrm = scene_normal(p);   // in the space we marched\n"
           << "        reportIntersectionEXT(t, 0u);\n"
           << "    }\n";
     else
@@ -254,6 +265,7 @@ inline std::string emit_instanced_closest_hit(const char* hdr,
                                               const std::string& push,
                                               const std::string& proto_shared,
                                               bool redirect_shadow,
+                                              bool rotate_normal,
                                               std::string& error) {
     std::string shared = proto_shared;
     if (redirect_shadow) {
@@ -289,12 +301,15 @@ inline std::string emit_instanced_closest_hit(const char* hdr,
       << "struct RtHit { vec3 pos; vec3 nrm; };\n"
       << "hitAttributeEXT RtHit hit_attr;\n"
       << "void main() {\n"
-      << "    vec3 p = hit_attr.pos;\n"
-      << "    // A normal transforms by the inverse transpose of object->world.\n"
-      << "    // gl_WorldToObjectEXT IS that inverse, so multiplying the normal\n"
-      << "    // on the LEFT by it applies the transpose: n * M == transpose(M) * n.\n"
-      << "    vec3 n = hit_attr.nrm * mat3(gl_WorldToObjectEXT);\n"
-      << "    float nl = length(n);\n"
+      << "    vec3 p = hit_attr.pos;\n";
+    if (rotate_normal)
+        s << "    // A normal transforms by the inverse transpose of object->world.\n"
+          << "    // gl_WorldToObjectEXT IS that inverse, so multiplying the normal\n"
+          << "    // on the LEFT by it applies the transpose: n * M == transpose(M) * n.\n"
+          << "    vec3 n = hit_attr.nrm * mat3(gl_WorldToObjectEXT);\n";
+    else
+        s << "    vec3 n = hit_attr.nrm;   // already world space\n";
+    s << "    float nl = length(n);\n"
       << "    n = nl > 1e-20 ? n / nl : vec3(0.0, 1.0, 0.0);\n"
       << "    prd = shade(p, n, -gl_WorldRayDirectionEXT);\n"
       << "}\n";
@@ -513,14 +528,19 @@ emit_rt_per_group(const SceneGraph& full_scene,
                                  cfg.shadow_samples > 1;
     const bool bounded_chit = object_space &&
                               (!cfg.enable_shadows || cfg.shadow_samples > 1);
-    out.rchit = object_space ? std::string{} : base->rchit;
+    out.rchit = std::string{};
     if (redirect_shadow) out.rmiss_shadow = emit_shadow_miss(hdr);
 
-    // Not bounded: one whole-scene closest-hit, shared by every hit group.
-    if (object_space && !bounded_chit) {
+    // Not bounded: one whole-scene closest-hit, shared by every hit group. The
+    // per-group path lands here too -- it keeps the whole-scene shading but
+    // still takes its normal from the attribute, which is where four fifths of
+    // that stage used to be.
+    if (!bounded_chit) {
         std::string cerr;
         std::string ch = emit_instanced_closest_hit(hdr, push, full_shared,
-                                                    /*redirect_shadow=*/false, cerr);
+                                                    /*redirect_shadow=*/false,
+                                                    /*rotate_normal=*/object_space,
+                                                    cerr);
         if (!cerr.empty()) return std::unexpected(cerr);
         out.rchit_per_group.push_back(std::move(ch));
     }
@@ -541,11 +561,14 @@ emit_rt_per_group(const SceneGraph& full_scene,
         // push block is identical across groups (same camera/lights), so reuse
         // the full scene's; the group only changes scene_sdf.
         out.rint_per_group.push_back(
-            emit_intersection(hdr, push, gshared, cfg, object_space));
+            emit_intersection(hdr, push, gshared, cfg, object_space,
+                              /*carry_normal=*/true));
         if (bounded_chit) {
             std::string cerr;
             std::string ch = emit_instanced_closest_hit(hdr, push, gshared,
-                                                        redirect_shadow, cerr);
+                                                        redirect_shadow,
+                                                        /*rotate_normal=*/true,
+                                                        cerr);
             if (!cerr.empty())
                 return std::unexpected(cerr + " (prototype " + std::to_string(i) + ")");
             out.rchit_per_group.push_back(std::move(ch));
