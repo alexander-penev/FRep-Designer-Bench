@@ -22,6 +22,24 @@ cd "$(dirname "$0")"
 
 BIN=frep4_bench/build_render
 OUT=results/paper
+
+# Energy is read from the RAPL package counter, and there are two ways to reach
+# it. The powercap file is root-only on a stock distribution (a mitigation for
+# PLATYPUS, which recovered keys from RAPL traces), so everything here goes
+# through the perf_event PMU instead -- which needs kernel.perf_event_paranoid
+# at 0 or below. Without it nothing breaks and nothing errors: every joules
+# column silently becomes -1, the tables render dashes, and the energy axis
+# quietly stops existing. That failure is invisible in the output, which is why
+# it is checked here rather than discovered in a table.
+paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 99)
+if [ "$paranoid" -gt 0 ] 2>/dev/null; then
+    echo "paper_numbers.sh: kernel.perf_event_paranoid is $paranoid; RAPL is" >&2
+    echo "  unreadable and every energy column will be a dash. Fix with:" >&2
+    echo "    sudo sysctl -w kernel.perf_event_paranoid=0" >&2
+    echo "  and persist it in /etc/sysctl.d/99-perf.conf. Set" >&2
+    echo "  FREP_ALLOW_NO_ENERGY=1 to regenerate the timing tables anyway." >&2
+    [ -n "$FREP_ALLOW_NO_ENERGY" ] || exit 1
+fi
 SCENES="s1_sphere s2_csg s3_blend s4_gyroid s5_twist c1_gear c2_colonnade"
 HDR="system,backend,scene,metric,size,ms,throughput,joules,uj_per_unit"
 

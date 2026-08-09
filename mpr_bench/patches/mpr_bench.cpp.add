@@ -1,7 +1,19 @@
 // dest: benchmark/mpr_bench.cpp
 // MPR render benchmark driver: same scenes + resolutions as libfive --render.
 // CSV: system,backend,scene,metric,size,ms,throughput,joules,uj_per_unit
-// Energy (joules,uj) left -1; GPU energy is sampled by run.sh via nvidia-smi.
+// Energy: with MPR_ENERGY_SECS set, each scene renders continuously for that
+// many seconds and the row reports marginal GPU energy per frame, measured the
+// way libfive's --render-energy and frep4_pathcost measure theirs -- NVML
+// counter rather than sampled nvidia-smi power, divided by frames actually
+// completed, with a settled idle floor subtracted. Without it the row keeps
+// the -1 the suite renders as a dash.
+//
+// The three properties matter for the same reasons they do elsewhere: NVML
+// integrates on a coarse cadence so a handful of millisecond frames samples
+// nothing; the card draws around forty watts doing nothing, and charging that
+// to whichever renderer is running makes a slow one look expensive for being
+// slow; and the floor has to be taken after a pause, or it is measured on a
+// card that is still boosted and over-subtracts.
 #include <libfive/tree/tree.hpp>
 #include <libfive/tree/archive.hpp>
 #include <Eigen/Dense>
@@ -12,8 +24,41 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <thread>
 #include "tape.hpp"
 #include "context.hpp"
+#include <dlfcn.h>
+
+// Total GPU energy in joules, or -1 when NVML is unavailable.
+//
+// Loaded through dlopen rather than linked. The benchmark() macro in mpr's own
+// CMakeLists links exactly one library, and teaching it about NVML would mean
+// patching upstream build files for a diagnostic -- a patch that breaks the
+// next time they move. dlopen keeps the dependency at run time and optional:
+// no NVML, no energy column, everything else unchanged.
+static double gpu_joules() {
+    typedef int (*init_t)();
+    typedef int (*handle_t)(unsigned, void**);
+    typedef int (*energy_t)(void*, unsigned long long*);
+    static bool tried = false, ok = false;
+    static void* dev = nullptr;
+    static energy_t get_energy = nullptr;
+    if (!tried) {
+        tried = true;
+        void* h = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
+        if (!h) h = dlopen("libnvidia-ml.so", RTLD_LAZY);
+        if (h) {
+            init_t   ini = (init_t)dlsym(h, "nvmlInit_v2");
+            handle_t gh  = (handle_t)dlsym(h, "nvmlDeviceGetHandleByIndex_v2");
+            get_energy   = (energy_t)dlsym(h, "nvmlDeviceGetTotalEnergyConsumption");
+            ok = ini && gh && get_energy && ini() == 0 && gh(0, &dev) == 0;
+        }
+    }
+    if (!ok) return -1;
+    unsigned long long mJ = 0;
+    if (get_energy(dev, &mJ) != 0) return -1;
+    return (double)mJ / 1e3;
+}
 
 static std::string base(std::string p) {
     auto s = p.find_last_of('/'); if (s != std::string::npos) p = p.substr(s + 1);
@@ -61,19 +106,53 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "mpr %s: %ld/%d surface px (%.1f%%)\n",
                          name.c_str(), hit, size * size, 100.0 * hit / (size * size));
         }
-        const int reps = 5;
-        std::vector<double> ms;
-        for (int r = 0; r < reps; ++r) {
-            auto a = std::chrono::steady_clock::now();
-            c.render3D(tape, T);
-            auto b = std::chrono::steady_clock::now();
-            ms.push_back(std::chrono::duration<double, std::milli>(b - a).count());
-        }
-        std::sort(ms.begin(), ms.end());
-        double m = ms[reps / 2];
+        using clk = std::chrono::steady_clock;
+        auto since = [](clk::time_point a) {
+            return std::chrono::duration<double>(clk::now() - a).count(); };
+        const char* es = std::getenv("MPR_ENERGY_SECS");
+        const double esecs = es ? std::atof(es) : 0.0;
+
+        double m = 0, J = -1;
         double px = double(size) * size;
-        std::printf("mpr,gpu-cuda,%s,render3d,%d,%.3f,%.3f,-1.000,-1.0000\n",
-                    name.c_str(), size, m, px / m / 1e3);
+        if (esecs > 0) {
+            static double idle_w = -1;
+            if (idle_w < 0) {                       // measured once per process
+                std::this_thread::sleep_for(std::chrono::seconds(3));  // settle
+                double j0 = gpu_joules();
+                auto t0 = clk::now();
+                while (since(t0) < 3.0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                double j1 = gpu_joules(), el = since(t0);
+                idle_w = (j0 < 0 || j1 < 0 || el <= 0) ? 0.0 : (j1 - j0) / el;
+                std::fprintf(stderr, "idle baseline: gpu %.1f W (subtracted)\n", idle_w);
+            }
+            double j0 = gpu_joules();
+            auto t0 = clk::now();
+            long frames = 0;
+            while (since(t0) < esecs) { c.render3D(tape, T); ++frames; }
+            cudaDeviceSynchronize();
+            double j1 = gpu_joules(), el = since(t0);
+            m = el * 1e3 / (double)frames;
+            if (j0 >= 0 && j1 >= 0) {
+                double marg = (j1 - j0) - idle_w * el;
+                if (marg < 0) marg = 0;             // measured, below the floor
+                J = marg / (double)frames;
+            }
+        } else {
+            const int reps = 5;
+            std::vector<double> ms;
+            for (int r = 0; r < reps; ++r) {
+                auto a = clk::now();
+                c.render3D(tape, T);
+                auto b = clk::now();
+                ms.push_back(std::chrono::duration<double, std::milli>(b - a).count());
+            }
+            std::sort(ms.begin(), ms.end());
+            m = ms[reps / 2];
+        }
+        std::printf("mpr,gpu-cuda,%s,render3d,%d,%.3f,%.3f,%.4f,%.4f\n",
+                    name.c_str(), size, m, px / m / 1e3,
+                    J, J < 0 ? -1.0 : J * 1e6 / px);
         std::fflush(stdout);
     }
     return 0;
