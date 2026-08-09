@@ -2,6 +2,7 @@
 //   --emit-frep DIR                    write canonical scenes as archives
 //   --grid N   [extra.frep ...]        grid-eval (canonical + imported)
 //   --render R [threads] [extra.frep..]heightmap render
+//   --render-energy R SECS [threads]   per-frame marginal CPU energy
 //   --export-hf in.frep out.hf         port an archive to HyperFun (DAG -> assignments)
 //   --export-expr in.frep out.txt      port to a single infix expression (frep4 CustomExpr)
 #include "scenes_trees.hpp"
@@ -17,6 +18,8 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <thread>
+#include <chrono>
 using libfive::Tree; using libfive::Opcode::Opcode;
 static std::string base(std::string p){auto s=p.find_last_of('/');if(s!=std::string::npos)p=p.substr(s+1);return p.substr(0,p.find(".frep"));}
 static Tree load(const char* p){
@@ -166,6 +169,66 @@ int main(int argc, char** argv) {
             auto [ms,J]=median_ms_energy([&]{auto h=libfive::Heightmap::render(t,vox,ab,th);(void)h;});
             double px=(double)R*R;
             csv_row("libfive","cpu-heightmap",n.c_str(),"render3d",R,ms,px/ms/1e3,J,J<0?-1:J*1e6/px);
+        }
+        return 0;
+    }
+    // Per-frame marginal CPU-package energy, measured the way frep4_pathcost
+    // measures it, so the two are comparable without reconciling conventions.
+    //
+    // Three things make this different from the -1 the joules column used to
+    // carry, and from the raw figure --render now reports:
+    //
+    //   * duration-based. RAPL integrates on a millisecond cadence, so timing a
+    //     handful of 6 ms frames samples almost nothing. Each scene renders
+    //     continuously for SECS and the total is divided by the frames that
+    //     actually completed.
+    //   * idle-subtracted. The package draws tens of watts doing nothing, and
+    //     charging that to whichever renderer happens to be running makes a
+    //     slow renderer look expensive for being slow. The floor is measured
+    //     once and removed, so the figure is the marginal cost of rendering.
+    //   * settled. The floor is measured after a pause, because taking it
+    //     immediately after a busy run catches a package that is still boosted
+    //     and over-subtracts -- far enough, in our case, to drive a genuinely
+    //     busy path to zero.
+    if (argc>=4 && !strcmp(argv[1],"--render-energy")) {
+        const int R=atoi(argv[2]);
+        const double secs=atof(argv[3]);
+        size_t th = argc>=5 ? (size_t)atoi(argv[4]) : 8;
+        using clk=std::chrono::steady_clock;
+        auto elapsed=[](clk::time_point a){
+            return std::chrono::duration<double>(clk::now()-a).count(); };
+
+        std::this_thread::sleep_for(std::chrono::seconds(3));   // settle
+        double idle_w = 0;
+        {
+            Rapl r; r.begin();
+            auto t0=clk::now();
+            while (elapsed(t0) < 3.0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            double J=r.joules(), el=elapsed(t0);
+            if (J >= 0 && el > 0) idle_w = J/el;
+        }
+        fprintf(stderr,"idle baseline: cpu %.1f W (subtracted below)\n", idle_w);
+
+        for (auto& [n,t]:scenes){
+            libfive::Voxels vox({-1.6f,-1.6f,-1.6f},{1.6f,1.6f,1.6f},R/3.2f);
+            std::atomic_bool ab(false);
+            { auto h=libfive::Heightmap::render(t,vox,ab,th); (void)h; }  // warm
+            Rapl r; r.begin();
+            auto t0=clk::now(); long frames=0;
+            while (elapsed(t0) < secs) {
+                std::atomic_bool a2(false);
+                auto h=libfive::Heightmap::render(t,vox,a2,th); (void)h;
+                ++frames;
+            }
+            double el=elapsed(t0), J=r.joules();
+            double marg = (J<0) ? -1 : (J - idle_w*el);
+            if (marg < 0 && J >= 0) marg = 0;   // measured, below the noise floor
+            double ms = el*1e3/(double)frames;
+            double px=(double)R*R;
+            csv_row("libfive","cpu-heightmap",n.c_str(),"render_energy",R,ms,
+                    px/ms/1e3, marg<0?-1:marg/frames,
+                    marg<0?-1:marg/frames*1e6/px);
         }
         return 0;
     }
