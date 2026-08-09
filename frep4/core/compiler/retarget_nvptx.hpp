@@ -55,40 +55,6 @@ namespace nvptx_detail {
 // non-NVIDIA reuse. It is NOT used by lower_transcendentals any more: measured
 // against CPU_IR on the sin/cos-heavy gyroid it diverged by 0.70 max, while the
 // hardware sin.approx comes in at 0.0028.
-inline llvm::Value* build_sin_poly(llvm::IRBuilder<>& b, llvm::Value* x);
-
-inline llvm::Value* range_reduce(llvm::IRBuilder<>& b, llvm::Value* x) {
-    // r = x - 2π * round(x / 2π)
-    llvm::Type* f = x->getType();
-    auto* inv2pi = llvm::ConstantFP::get(f, 0.15915494309189535);  // 1/(2π)
-    auto* twopi  = llvm::ConstantFP::get(f, 6.283185307179586);
-    auto* q = b.CreateFMul(x, inv2pi);
-    // round-to-nearest via llvm.round (NVPTX selects cvt.rni)
-    auto* rq = b.CreateUnaryIntrinsic(llvm::Intrinsic::round, q);
-    return b.CreateFSub(x, b.CreateFMul(rq, twopi));
-}
-
-// sin via odd minimax polynomial on the reduced range.
-inline llvm::Value* build_sin_poly(llvm::IRBuilder<>& b, llvm::Value* x) {
-    llvm::Type* f = x->getType();
-    auto* r  = range_reduce(b, x);
-    auto* r2 = b.CreateFMul(r, r);
-    // Horner: r * (c1 + r2*(c3 + r2*(c5 + r2*c7)))
-    auto C = [&](double v){ return llvm::ConstantFP::get(f, v); };
-    llvm::Value* p = C(-2.3889859e-08);          // ~ -1/9! scaled
-    p = b.CreateFAdd(b.CreateFMul(p, r2), C( 2.7525562e-06));  // 1/7!
-    p = b.CreateFAdd(b.CreateFMul(p, r2), C(-1.9841270e-04));  // -1/5!... 
-    p = b.CreateFAdd(b.CreateFMul(p, r2), C( 8.3333337e-03));  // 1/3!...
-    p = b.CreateFAdd(b.CreateFMul(p, r2), C(-1.6666667e-01));
-    p = b.CreateFAdd(b.CreateFMul(p, r2), C( 1.0));
-    return b.CreateFMul(p, r);  // sin(r) ≈ r * poly(r²)
-}
-
-inline llvm::Value* build_cos_poly(llvm::IRBuilder<>& b, llvm::Value* x) {
-    // cos(x) = sin(x + π/2)
-    llvm::Type* f = x->getType();
-    return build_sin_poly(b, b.CreateFAdd(x, llvm::ConstantFP::get(f, 1.5707963267948966)));
-}
 
 //  exp2 and log2 are the only transcendentals NVPTX selects natively
 //  (ex2.approx.f32 / lg2.approx.f32); everything else has to be built on them.
@@ -116,9 +82,12 @@ inline llvm::Value* nv_exp2(llvm::IRBuilder<>& b, llvm::Module& mod, llvm::Value
 
 //  sin/cos: NVPTX has sin.approx.f32 / cos.approx.f32 in hardware, reachable
 //  through the NVVM intrinsics — the same instructions the GLSL path ends up
-//  on. Using them instead of the hand-rolled polynomial below puts GPU_IR on
-//  the same footing as GPU_GLSL, which measured markedly closer to CPU_IR on
-//  the sin/cos-heavy gyroid (0.22 vs 0.70 max).
+//  on. This replaced a hand-rolled minimax polynomial that existed only
+//  because NVPTX cannot select llvm.sin ("Cannot select: fsin") -- not for
+//  accuracy. The hardware instruction turned out to be both faster (one SFU
+//  op against a range reduction plus a four-term Horner) and closer to the
+//  CPU reference on the sin/cos-heavy gyroid, 0.22 against 0.70 max. The
+//  polynomial is gone; git history has it if the trade ever needs revisiting.
 inline llvm::Value* nv_sin(llvm::IRBuilder<>& b, llvm::Module& mod, llvm::Value* x) {
     auto* f = llvm::Intrinsic::getOrInsertDeclaration(&mod, llvm::Intrinsic::nvvm_sin_approx_f);
     return b.CreateCall(f, {x});
