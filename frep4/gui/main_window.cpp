@@ -41,6 +41,9 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QPageSize>
+#include <QPainter>
+#include <QPdfWriter>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QInputDialog>
@@ -425,6 +428,9 @@ void MainWindow::build_menu() {
     auto* export_img = file_menu->addAction("Export rendered image...");
     connect(export_img, &QAction::triggered, this, &MainWindow::on_export_image);
 
+    auto* export_gui = file_menu->addAction("Save GUI as PDF...");
+    connect(export_gui, &QAction::triggered, this, &MainWindow::on_export_gui_pdf);
+
     auto* export_mesh = file_menu->addAction("Export mesh (OBJ/STL)...");
     connect(export_mesh, &QAction::triggered, this, &MainWindow::on_export_mesh);
 
@@ -574,6 +580,71 @@ void MainWindow::on_save_scene() {
     } else {
         QMessageBox::critical(this, "Error", "Failed to write the file.");
     }
+}
+
+void MainWindow::on_export_gui_pdf() {
+    // Save the interface itself as vector PDF rather than a screenshot.
+    // QWidget::render replays every widget's paintEvent into a QPainter, and a
+    // QPdfWriter's painter records those calls as PDF drawing operators, so the
+    // menus, labels, tables and control frames come out as real text and paths:
+    // selectable, searchable, and sharp at any zoom. A figure in a paper wants
+    // exactly that, and a PNG of the same window does not survive printing.
+    //
+    // One part of the window cannot come along, and it has to be handled rather
+    // than silently dropped. The real-time viewport is a QVulkanWindow inside a
+    // container widget -- a native child window that Qt composites itself and
+    // that QWidget::render does not see at all, leaving a blank rectangle where
+    // the render was. So the viewport is captured separately through the same
+    // IViewport::capture_image() the image export uses, and painted into the
+    // rectangle its container occupies. That part is a bitmap, necessarily: it
+    // is a rendered image, not vector art. Everything around it stays vector.
+    QString path = QFileDialog::getSaveFileName(
+        this, "Save GUI as PDF", "frep_gui.pdf", "PDF (*.pdf)");
+    if (path.isEmpty()) return;
+    if (!path.endsWith(".pdf", Qt::CaseInsensitive)) path += ".pdf";
+
+    QPdfWriter pdf(path);
+    pdf.setPageSize(QPageSize(QPageSize::A4));
+    pdf.setPageOrientation(QPageLayout::Landscape);
+    // No margins: the window is the figure, and a default 1 cm frame around it
+    // only shrinks the content on the page.
+    pdf.setPageMargins(QMarginsF(0, 0, 0, 0));
+    // 600 dpi rather than the 1200 default. The viewport bitmap is placed at
+    // whatever size the page gives it, and at 1200 dpi an A4 landscape page is
+    // ~14000 units wide, which scales a 900 px capture up eightfold for no gain
+    // in detail and a large file.
+    pdf.setResolution(600);
+
+    QPainter painter;
+    if (!painter.begin(&pdf)) {
+        QMessageBox::critical(this, "Error", "Could not open the file for writing.");
+        return;
+    }
+
+    // Fit the window to the page, preserving aspect; never enlarge past the
+    // page, and centre what is left over.
+    const double sx = pdf.width()  / double(width());
+    const double sy = pdf.height() / double(height());
+    const double s  = qMin(sx, sy);
+    painter.translate((pdf.width()  - width()  * s) / 2.0,
+                      (pdf.height() - height() * s) / 2.0);
+    painter.scale(s, s);
+
+    render(&painter);
+
+    // Paint the viewport over the hole the window container left behind.
+    if (viewport_iv_ && viewport_container_) {
+        QImage frame = viewport_iv_->capture_image();
+        if (!frame.isNull()) {
+            QRect r(viewport_container_->mapTo(this, QPoint(0, 0)),
+                    viewport_container_->size());
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            painter.drawImage(r, frame);
+        }
+    }
+
+    painter.end();
+    statusBar()->showMessage("Saved GUI as vector PDF: " + path);
 }
 
 void MainWindow::on_export_image() {

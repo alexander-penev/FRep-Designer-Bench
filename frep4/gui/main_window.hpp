@@ -84,6 +84,7 @@ private Q_SLOTS:
     void on_save_scene();
     void on_import_mesh();
     void on_export_image();
+    void on_export_gui_pdf();
     void on_export_mesh();
     // Node graph editor → scene: builds the tree and reloads the scene.
     void on_graph_changed();
