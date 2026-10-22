@@ -105,8 +105,12 @@ int main(int argc, char** argv) {
         // Let the machine settle first. Measuring the floor immediately after
         // the previous scene's run catches a package that is still hot and
         // boosted, which inflates the baseline and then over-subtracts -- far
-        // enough to drive a busy CPU path's marginal energy to zero.
-        std::this_thread::sleep_for(std::chrono::seconds(3));
+        // enough to drive a busy CPU path's marginal energy to zero. The GPU
+        // needs the longer wait: after a load it sits in P5 (27 W on this
+        // card) for about ten seconds before dropping to P8 (14 W), and a
+        // floor taken in P5 under-subtracts by 13 W -- 9 mJ per frame at
+        // 1500 frames per second, which is the size of the number measured.
+        std::this_thread::sleep_for(std::chrono::seconds(12));
         const double t_idle = 3.0;
         if (cpu_e && cpu_e->available()) cpu_e->begin();
         if (gpu_e && gpu_e->available()) gpu_e->begin();
