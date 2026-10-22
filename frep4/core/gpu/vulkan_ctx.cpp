@@ -37,6 +37,7 @@
 // to ensure correct teardown order; see the `Impl` struct.
 
 #include "core/gpu/vulkan_ctx.hpp"
+#include "core/gpu/rgba_unpack.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -280,19 +281,25 @@ struct VulkanCtx::Impl {
 // Static probe — returns true if Vulkan can enumerate ≥ 1 physical device.
 // ─────────────────────────────────────────────────────────────────────────────
 bool VulkanCtx::available() {
-    VkApplicationInfo ai{};
-    ai.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    ai.pApplicationName = "frep4-probe";
-    ai.apiVersion       = VK_API_VERSION_1_2;
-    VkInstanceCreateInfo ici{};
-    ici.sType            = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    ici.pApplicationInfo = &ai;
-    VkInstance inst = VK_NULL_HANDLE;
-    if (vkCreateInstance(&ici, nullptr, &inst) != VK_SUCCESS) return false;
-    std::uint32_t count = 0;
-    vkEnumeratePhysicalDevices(inst, &count, nullptr);
-    vkDestroyInstance(inst, nullptr);
-    return count > 0;
+    // Probed once: the loader re-reads every ICD manifest and each driver
+    // creates an instance, which is milliseconds — and the executor viewport
+    // asked on every frame of every path.
+    static const bool result = [] {
+        VkApplicationInfo ai{};
+        ai.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        ai.pApplicationName = "frep4-probe";
+        ai.apiVersion       = VK_API_VERSION_1_2;
+        VkInstanceCreateInfo ici{};
+        ici.sType            = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        ici.pApplicationInfo = &ai;
+        VkInstance inst = VK_NULL_HANDLE;
+        if (vkCreateInstance(&ici, nullptr, &inst) != VK_SUCCESS) return false;
+        std::uint32_t count = 0;
+        vkEnumeratePhysicalDevices(inst, &count, nullptr);
+        vkDestroyInstance(inst, nullptr);
+        return count > 0;
+    }();
+    return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -639,6 +646,25 @@ VulkanCtx::~VulkanCtx() = default;
 std::expected<void, std::string>
 VulkanCtx::render(const ShaderPush& push, std::vector<std::uint8_t>& out_rgba)
 {
+    return render_impl(push, [&](const std::uint8_t* src, std::size_t n) {
+        out_rgba.resize(n);
+        std::memcpy(out_rgba.data(), src, n);
+    });
+}
+
+std::expected<void, std::string>
+VulkanCtx::render(const ShaderPush& push, std::vector<float>& out_rgba)
+{
+    return render_impl(push, [&](const std::uint8_t* src, std::size_t n) {
+        out_rgba.resize(n);
+        unpack_rgba8(src, out_rgba.data(), n);
+    });
+}
+
+template <class Sink>
+std::expected<void, std::string>
+VulkanCtx::render_impl(const ShaderPush& push, Sink&& sink)
+{
     auto t0 = std::chrono::steady_clock::now();
     Impl& I = *impl_;
 
@@ -744,14 +770,13 @@ VulkanCtx::render(const ShaderPush& push, std::vector<std::uint8_t>& out_rgba)
     VK_TRY(vkQueueSubmit(I.compute_queue, 1, &si, I.fence));
     VK_TRY(vkWaitForFences(I.device, 1, &I.fence, VK_TRUE, ~0ULL));
 
-    // Map and copy. The staging buffer holds the tile tightly packed, so the
-    // caller's buffer is tile-sized (tw*th*4) — equal to the full frame when
-    // no tile was requested.
+    // Map and hand over. The staging buffer holds the tile tightly packed, so
+    // the caller's buffer is tile-sized (tw*th*4) — equal to the full frame
+    // when no tile was requested.
     std::size_t expected_size = static_cast<std::size_t>(tw) * th * 4;
-    out_rgba.resize(expected_size);
     void* mapped = nullptr;
     VK_TRY(vkMapMemory(I.device, I.staging_mem, 0, I.staging_sz, 0, &mapped));
-    std::memcpy(out_rgba.data(), mapped, expected_size);
+    sink(static_cast<const std::uint8_t*>(mapped), expected_size);
     vkUnmapMemory(I.device, I.staging_mem);
 
     auto t1 = std::chrono::steady_clock::now();

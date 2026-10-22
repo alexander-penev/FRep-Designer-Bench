@@ -172,6 +172,12 @@ public:
     std::expected<void, std::string>
     render(const ShaderPush& push, std::vector<std::uint8_t>& out_rgba);
 
+    // Same, converted to float RGBA straight out of the mapped staging buffer
+    // — for callers that want floats anyway (the executors), so the frame is
+    // touched once instead of being copied as bytes and then widened.
+    std::expected<void, std::string>
+    render(const ShaderPush& push, std::vector<float>& out_rgba);
+
     // Re-upload the runtime parameter buffer (binding 3); a cheap memcpy into
     // the persistently-mapped buffer, so an interactive parameter edit reuses
     // the compiled pipeline. No-op if created without a parameter buffer.
@@ -180,12 +186,18 @@ public:
     const GpuRenderStats& stats() const { return stats_; }
 
     // Quick availability probe — returns true if any Vulkan device exists.
-    // Useful for tests that should skip when Vulkan is missing.
+    // Useful for tests that should skip when Vulkan is missing. The answer is
+    // computed once per process: the probe creates and destroys a VkInstance,
+    // and executors ask before every frame.
     static bool available();
 
 private:
     VulkanCtx() = default;
     struct Impl;
+    // Records, submits and waits for one dispatch, then hands the mapped
+    // tile bytes (tightly packed RGBA8) to `sink` before unmapping.
+    template <class Sink>
+    std::expected<void, std::string> render_impl(const ShaderPush& push, Sink&& sink);
     std::unique_ptr<Impl> impl_;
     GpuRenderStats stats_;
 };

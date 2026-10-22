@@ -9,6 +9,7 @@
 #include <array>
 #include <memory>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -284,6 +285,46 @@ public:
         std::size_t h = 0;
         for (auto& [id, obj] : objects_)
             h = h * 2654435761ull ^ obj.geometry->structure_hash();
+        return h;
+    }
+
+    // ── Hash of everything a Constant-mode compile bakes in ──────────────────
+    // scene_hash() covers the geometry (structure and parameter values), but a
+    // compiled kernel also bakes each object's material, skips invisible
+    // objects and embeds the light list. An executor caching its kernel on
+    // scene_hash() alone would serve a stale image after a material, light or
+    // visibility edit; this is the key to cache on. The camera is left out —
+    // every path passes it per frame. Texture pixels are represented by their
+    // size and path, not their contents: hashing megabytes per frame would cost
+    // more than the compile it guards, and the editor changes the path when it
+    // swaps an image. Paths whose shaders read the lights from push constants
+    // pass with_lights = false, so a light edit is not a rebuild for them.
+    std::size_t content_hash(bool with_lights = true) const noexcept {
+        auto mix  = [](std::size_t& h, std::size_t v) noexcept { h = h * 2654435761ull ^ v; };
+        auto mixf = [&](std::size_t& h, float f) noexcept { mix(h, std::hash<float>{}(f)); };
+        std::size_t h = scene_hash();
+        for (auto& [id, obj] : objects_) {
+            const Material& m = obj.material;
+            mix(h, obj.visible ? 0x9E3779B9ull : 0x7F4A7C15ull);
+            for (float f : m.albedo)  mixf(h, f);
+            for (float f : m.albedo2) mixf(h, f);
+            mix(h, static_cast<std::size_t>(m.pattern));
+            mixf(h, m.pattern_scale);
+            mix(h, static_cast<std::size_t>(m.texture_width));
+            mix(h, static_cast<std::size_t>(m.texture_height));
+            mix(h, m.texture_rgba.size());
+            mix(h, std::hash<std::string>{}(m.texture_path));
+            mixf(h, m.roughness);
+            mixf(h, m.metallic);
+            mixf(h, m.emission);
+            mixf(h, m.reflectivity);
+        }
+        if (with_lights)
+            for (const PointLight& l : lights_) {
+                for (float f : l.pos)   mixf(h, f);
+                for (float f : l.color) mixf(h, f);
+                mixf(h, l.intensity);
+            }
         return h;
     }
 

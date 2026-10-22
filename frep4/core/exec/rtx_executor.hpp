@@ -93,10 +93,10 @@ public:
         //    scene, not the camera. Rebuild them only when the scene changes;
         //    a camera move (the common interactive case) reuses everything and
         //    the pipeline cache then makes the trace a warm-cache hit.
-        std::uint64_t skey = scene_key(scene, W, H);
+        std::uint64_t skey = scene_key(scene);
         if (skey != scene_key_ || !accel_) {
-            // Scene (or frame size) changed → rebuild shaders, SPIR-V, AS, and
-            // drop the stale pipeline cache (different shaders).
+            // Scene changed → rebuild shaders, SPIR-V, AS, and drop the stale
+            // pipeline cache (different shaders).
             cache_.release(*ctx_);
 
             auto compile = [](const std::string& src, const char* stage,
@@ -330,24 +330,16 @@ private:
         return box;
     }
 
-    // A cheap fingerprint of the scene + frame size, to detect when shaders/AS
-    // must be rebuilt (vs a camera-only change, which reuses them). Hashes each
-    // object's geometry pointer + material + the W/H; a structural edit (add/
-    // remove/retype a node) or a resize changes it, a camera move doesn't.
-    static std::uint64_t scene_key(const SceneGraph& scene, int W, int H) {
-        std::uint64_t h = 1469598103934665603ull;
-        auto mix = [&](std::uint64_t v) { h ^= v; h *= 1099511628211ull; };
-        mix((std::uint64_t)W); mix((std::uint64_t)H);
-        for (const auto& kv : scene.objects()) {
-            mix(std::hash<const void*>{}(kv.second.geometry.get()));
-            mix(kv.second.visible ? 1u : 0u);
-            // Material affects the emitted albedo/shade, so fold it in.
-            const auto& m = kv.second.material;
-            mix(std::hash<float>{}(m.albedo[0] + m.albedo[1] + m.albedo[2]));
-            mix(std::hash<float>{}(m.roughness));
-            mix(std::hash<float>{}(m.metallic));
-        }
-        return h;
+    // A fingerprint of what the shaders and the acceleration structure bake
+    // in, to tell a rebuild from a camera-only change. Geometry (structure and
+    // parameter values), visibility and materials are in; the camera, lights
+    // and frame size are out — camera and lights travel in push constants, and
+    // acquire_frame_rt recreates the frame image on a resize. This used to
+    // hash the geometry *pointer*, which missed in-place parameter edits and
+    // kept serving the old shaders, and W/H, which rebuilt the shaders and the
+    // acceleration structure for every window resize.
+    static std::uint64_t scene_key(const SceneGraph& scene) {
+        return scene.content_hash(/*with_lights=*/false);
     }
 
 private:

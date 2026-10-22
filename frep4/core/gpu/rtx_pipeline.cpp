@@ -10,6 +10,7 @@
 //   6. vkCmdTraceRaysKHR, then copy image → host-visible buffer → floats
 
 #include "core/gpu/rtx_pipeline.hpp"
+#include "core/gpu/rgba_unpack.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -742,9 +743,7 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     {
         void* p = nullptr;
         vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
-        const auto* b = static_cast<const std::uint8_t*>(p);
-        for (std::size_t i = 0; i < out.rgba.size(); ++i)
-            out.rgba[i] = b[i] / 255.0f;
+        unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
         vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();
@@ -1203,9 +1202,7 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     {
         void* p = nullptr;
         vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
-        const auto* b = static_cast<const std::uint8_t*>(p);
-        for (std::size_t i = 0; i < out.rgba.size(); ++i)
-            out.rgba[i] = b[i] / 255.0f;
+        unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
         vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();

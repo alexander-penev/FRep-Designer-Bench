@@ -3,16 +3,18 @@
 // IExecutor for the GPU-GLSL path: codegen → GLSL → glslang → SPIR-V →
 // Vulkan compute. Renders a tile by setting the tile bounds in the push
 // constants so the shader computes only that sub-region (dispatch is sized
-// to the tile), then copies the tile pixels out of the full-frame readback
-// and converts RGBA8 → float to match the CPU executor's format.
+// to the tile); the context reads back exactly that tile and converts it
+// RGBA8 → float to match the CPU executor's format.
 //
 // Needs a real Vulkan device: available() reflects VulkanCtx::available().
 // In environments without one (software-only CI) the executor reports
 // unavailable and the multi-path runner skips it.
 //
 // The Vulkan context + compiled shader are built lazily on first render and
-// cached (creation is expensive), keyed by the scene's emitted GLSL so a
-// changed scene rebuilds. This makes per-tile rendering cheap after warm-up.
+// cached (creation is expensive). The cache has two levels: while the scene's
+// content_hash is unchanged the shader is reused without emitting GLSL at
+// all, and when it does change the shader is rebuilt only if the emitted
+// source differs. This makes per-tile rendering cheap after warm-up.
 
 #pragma once
 
@@ -27,6 +29,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,7 +48,7 @@ public:
     // every parameter baked, the previous behaviour). When set, runtime-placed
     // parameters are read from the shader's binding-3 buffer, so editing them
     // re-uploads the buffer instead of recompiling the SPIR-V. Not owned.
-    void set_compile_policy(const CompilePolicy* p) { policy_ = p; }
+    void set_compile_policy(const CompilePolicy* p) { policy_ = p; have_key_ = false; }
 
     PathKind path() const override { return PathKind::GpuGlsl; }
     bool available() const override { return gpu::VulkanCtx::available(); }
@@ -90,18 +94,31 @@ public:
             }
             cfg = cull_resolved_cfg_;
         }
-        auto emit = gpu::GlslEmitter::emit(scene, cfg, btp);
-        if (!emit) { r.error = "glsl emit: " + emit.error(); return r; }
+        // The emitted source is a function of the scene content and cfg, so
+        // while content_hash is unchanged the shader we have is the one a fresh
+        // emit would produce: skip the emit and the source compare. Both ran on
+        // every frame before — string-building a 12–25 KB shader just to find
+        // it equal — and in tiled layouts that was paid once per tile. Runtime
+        // parameter values are not in the source (that is what the binding
+        // table is for), so the pbuf refresh below still runs every frame.
+        const std::size_t key = scene.content_hash();
+        const bool reuse = ctx_ && have_key_ && key == cached_key_;
+        if (!reuse) {
+            auto emit = gpu::GlslEmitter::emit(scene, cfg, btp);
+            if (!emit) { r.error = "glsl emit: " + emit.error(); return r; }
 
-        // Rebuild context when the shader source changes (new scene/placement).
-        if (!ctx_ || emit->source != cached_glsl_) {
-            auto spv = gpu::compile_glsl_to_spv_managed(emit->source);
-            if (!spv) { r.error = "spirv: " + spv.error(); return r; }
-            auto ctx_or = gpu::VulkanCtx::create(
-                spv->path(), emit->mesh_voxels, emit->texture_pixels, pbuf);
-            if (!ctx_or) { r.error = "vulkan ctx create failed"; return r; }
-            ctx_ = std::move(*ctx_or);
-            cached_glsl_ = emit->source;
+            // Rebuild context when the shader source changes (new scene/placement).
+            if (!ctx_ || emit->source != cached_glsl_) {
+                auto spv = gpu::compile_glsl_to_spv_managed(emit->source);
+                if (!spv) { r.error = "spirv: " + spv.error(); return r; }
+                auto ctx_or = gpu::VulkanCtx::create(
+                    spv->path(), emit->mesh_voxels, emit->texture_pixels, pbuf);
+                if (!ctx_or) { r.error = "vulkan ctx create failed"; return r; }
+                ctx_ = std::move(*ctx_or);
+                cached_glsl_ = emit->source;
+            }
+            cached_key_ = key;
+            have_key_   = true;
         }
         // Push current runtime parameter values (cheap memcpy; no-op when there
         // are none). The parameter-edit fast path on GPU-GLSL: no re-emit, no
@@ -116,29 +133,37 @@ public:
         push.tile_x0 = tile.x0; push.tile_y0 = tile.y0;
         push.tile_x1 = tile.x1; push.tile_y1 = tile.y1;
 
-        std::vector<std::uint8_t> px;   // RGBA8 readback of just this tile
+        // The context reads back exactly the tile (tightly packed) and converts
+        // it to float straight out of the mapped staging buffer — one pass over
+        // the frame instead of a byte copy, a zero-fill and a divide loop.
         auto t_r = clk::now();
-        auto rr = ctx_->render(push, px);
+        auto rr = ctx_->render(push, r.rgba);
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
         if (!rr) { r.error = "gpu render failed"; return r; }
-
-        // The context reads back exactly the tile (tightly packed), so this is
-        // a straight RGBA8 → float conversion, not a crop out of a full frame.
-        int tw = tile.width(), th = tile.height();
-        r.rgba.assign((std::size_t)tw * th * 4, 0.0f);
-        std::size_t n = std::min(r.rgba.size(), px.size());
-        for (std::size_t i = 0; i < n; ++i) r.rgba[i] = px[i] / 255.0f;
 
         const auto& st = ctx_->stats();
         r.render_ms = st.render_ms > 0 ? st.render_ms : r.render_ms;
         r.threads_used = 0;   // GPU — not CPU threads
         r.ok = true;
+
+        if (profile_enabled())
+            std::fprintf(stderr, "gpu_glsl-prof: %-5s compile=%.3f run=%.3f total=%.3f ms\n",
+                reuse ? "reuse" : "emit", r.compile_ms, r.render_ms,
+                std::chrono::duration<double, std::milli>(clk::now() - t_c).count());
         return r;
     }
 
 private:
+    // FREP_EXEC_PROFILE=1 prints one line per frame with the stage split.
+    static bool profile_enabled() {
+        static const bool on = std::getenv("FREP_EXEC_PROFILE") != nullptr;
+        return on;
+    }
+
     std::unique_ptr<gpu::VulkanCtx> ctx_;
-    std::string cached_glsl_;
+    std::string cached_glsl_;             // source the current pipeline was built from
+    std::size_t cached_key_ = 0;          // content_hash the source was emitted for
+    bool        have_key_   = false;
     const SceneGraph*   cull_resolved_scene_ = nullptr;
     TracerConfig        cull_resolved_cfg_{};
     TracerConfig cfg_;

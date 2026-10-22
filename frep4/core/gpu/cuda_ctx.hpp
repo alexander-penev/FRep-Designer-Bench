@@ -9,9 +9,10 @@
 // native NVIDIA route for executing LLVM IR on the GPU (NVIDIA's OpenCL
 // can't ingest SPIR-V, so the OpenCL/SPIR-V path doesn't run here).
 //
-// Runtime mirror of VulkanCtx / OpenClCtx. Part 1 launches render_tile as a
-// single thread over the whole tile (correctness first); Part 2 switches to
-// a per-pixel grid for real GPU parallelism.
+// Runtime mirror of VulkanCtx. The kernel is launched as a 2D grid with one
+// thread per pixel of the requested tile; the output lives in a full-frame
+// float RGBA buffer on the device and only the tile rectangle is read back,
+// into a pinned host buffer the context keeps across frames.
 //
 // We declare the small slice of the CUDA Driver API we use rather than
 // depend on the full cuda.h, so this compiles without the CUDA toolkit
@@ -40,7 +41,9 @@ struct CudaRenderArgs {
 struct CudaRenderStats {
     double init_ms   = 0;   // cuInit + device + context
     double build_ms  = 0;   // cuModuleLoadData (PTX → SASS JIT)
-    double render_ms = 0;   // launch + sync + readback
+    double render_ms = 0;   // the whole render(): upload + launch + wait + readback
+    double launch_ms = 0;   // host side of cuLaunchKernel (enqueue only)
+    double copy_ms   = 0;   // readback: waits for the kernel, then the DtoH copy
     int    width = 0, height = 0;
     std::string device_name;
 };
@@ -55,12 +58,15 @@ public:
     CudaCtx(const CudaCtx&)            = delete;
     CudaCtx& operator=(const CudaCtx&) = delete;
 
-    // Render args into out_rgba (iw*ih*4 RGBA8). `params` is the kernel's
-    // optional parameter buffer (may be empty).
+    // Render the tile in `args` and return its pixels in out_rgba as float
+    // RGBA, tightly packed row by row, clipped to the frame (so a tile that
+    // reaches outside the iw×ih frame comes back smaller than requested).
+    // The values are what the kernel wrote — no clamp, no quantisation.
+    // `params` is the kernel's optional parameter buffer (may be empty).
     std::expected<void, std::string>
     render(const CudaRenderArgs& args,
            const std::vector<float>& params,
-           std::vector<std::uint8_t>& out_rgba);
+           std::vector<float>& out_rgba);
 
     const CudaRenderStats& stats() const { return stats_; }
 

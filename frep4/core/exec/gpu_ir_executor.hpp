@@ -1,18 +1,15 @@
 // core/exec/gpu_ir_executor.hpp
 //
-// IExecutor for the GPU-IR path: codegen → LLVM IR → llvm-spirv → SPIR-V
-// kernel → OpenCL. This shares the IR source with the CPU-IR path (same
-// codegen / same render_tile), then retargets the IR to a SPIR-V compute
-// kernel and runs it on the GPU through OpenCL — the "one IR, two targets"
-// result (JIT for CPU, OpenCL for GPU), distinct from the GLSL→Vulkan path.
+// IExecutor for the GPU-IR path: codegen → LLVM IR → NVPTX → PTX → CUDA
+// Driver API. This shares the IR source with the CPU-IR path (same codegen,
+// same render_tile), then retargets the IR to a per-pixel CUDA kernel and
+// runs it on the GPU — the "one IR, two targets" result (JIT for CPU, PTX for
+// GPU), distinct from the GLSL→Vulkan path.
 //
-// Needs a real OpenCL GPU device: available() reflects OpenClCtx::available().
-// The OpenCL context (SPIR-V build is expensive) is created once and cached,
-// keyed by the emitted IR, so per-tile rendering is cheap after warm-up.
-//
-// Part 1: the kernel is render_tile run as a single work-item over the tile
-// (its internal loop walks the pixels). Part 2 will switch codegen to a
-// per-pixel kernel + an NDRange launch for real GPU parallelism.
+// Needs an NVIDIA device: available() reflects CudaCtx::available(). The
+// compiled kernel is cached twice over: codegen is skipped while the scene's
+// content_hash is unchanged, and when it does run, the PTX is rebuilt only if
+// the IR text differs from the one the current CUDA module came from.
 
 #pragma once
 
@@ -25,9 +22,13 @@
 
 #include <llvm/Support/TargetSelect.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -47,7 +48,7 @@ public:
     // runtime-placed parameters are read from the kernel's `params` buffer, so
     // editing them re-uploads the buffer instead of rebuilding the PTX. Not
     // owned; must outlive the executor.
-    void set_compile_policy(const CompilePolicy* p) { policy_ = p; }
+    void set_compile_policy(const CompilePolicy* p) { policy_ = p; have_key_ = false; }
 
     PathKind path() const override { return PathKind::GpuIr; }
 #ifdef FREP_HAS_CUDA
@@ -68,46 +69,69 @@ public:
 #else
 
         auto t_c = clk::now();
-        // Codegen the same render_tile the CPU path JITs.
-        auto ctx = std::make_unique<llvm::LLVMContext>();
-        TracerConfig cfg = cfg_;
-        // Opt-in incremental params (see set_compile_policy): runtime-placed
-        // parameters become `params` buffer loads, so the emitted IR — and thus
-        // the cached PTX — is invariant to those values. Without a policy this
-        // is exactly the previous all-baked path.
-        cfg.incremental_params = (policy_ != nullptr);
-        SceneCodegen cg(*ctx, cfg);
-        cg.set_compile_policy(policy_);
-        try {
-            cg.emit_gpu_kernel(scene, mode_);   // per-pixel CUDA kernel
-        } catch (const std::exception& e) {
-            r.error = std::string("codegen: ") + e.what();
-            return r;
-        }
-        auto mod = cg.take_module();
+        // Codegen bakes the geometry, materials, visibility and lights into
+        // the kernel, so while the scene's content_hash is unchanged the
+        // kernel we already have is the kernel codegen would produce: skip it.
+        // Before this check, every frame re-ran codegen and printed the whole
+        // module to text just to compare it with the cached text — 1–2 ms per
+        // frame, more than the kernel itself at 512². Runtime parameters (a
+        // policy is installed) are the exception: the bindings codegen
+        // produces carry the current values, so it runs to refresh them, and
+        // the IR-text compare below still spares the PTX rebuild.
+        const std::size_t key = scene.content_hash();
+        const bool reuse = cuda_ctx_ && have_key_ && key == cached_key_ && !policy_;
+        if (!reuse) {
+            // Codegen the same render_tile the CPU path JITs.
+            auto ctx = std::make_unique<llvm::LLVMContext>();
+            TracerConfig cfg = cfg_;
+            // Opt-in incremental params (see set_compile_policy): runtime-placed
+            // parameters become `params` buffer loads, so the emitted IR — and
+            // thus the cached PTX — is invariant to those values. Without a
+            // policy this is exactly the previous all-baked path.
+            cfg.incremental_params = (policy_ != nullptr);
+            SceneCodegen cg(*ctx, cfg);
+            cg.set_compile_policy(policy_);
+            try {
+                cg.emit_gpu_kernel(scene, mode_);   // per-pixel CUDA kernel
+            } catch (const std::exception& e) {
+                r.error = std::string("codegen: ") + e.what();
+                return r;
+            }
+            auto mod = cg.take_module();
 
-        // Ensure the LLVM NVPTX backend is registered — once per process.
-        static std::once_flag init_flag;
-        std::call_once(init_flag, [] {
-            llvm::InitializeAllTargetInfos();
-            llvm::InitializeAllTargets();
-            llvm::InitializeAllTargetMCs();
-            llvm::InitializeAllAsmPrinters();
-        });
+            // Ensure the LLVM NVPTX backend is registered — once per process.
+            static std::once_flag init_flag;
+            std::call_once(init_flag, [] {
+                llvm::InitializeAllTargetInfos();
+                llvm::InitializeAllTargets();
+                llvm::InitializeAllTargetMCs();
+                llvm::InitializeAllAsmPrinters();
+            });
 
-        // Retarget IR → PTX. Cache the CUDA context (PTX JIT is expensive)
-        // keyed on the IR text so a changed scene rebuilds.
-        std::string ir_text;
-        { llvm::raw_string_ostream os(ir_text); mod->print(os, nullptr); }
+            // Retarget IR → PTX. Cache the CUDA context (PTX JIT is expensive)
+            // keyed on the IR text so a changed scene rebuilds.
+            std::string ir_text;
+            { llvm::raw_string_ostream os(ir_text); mod->print(os, nullptr); }
 
-        if (!cuda_ctx_ || ir_text != cached_ir_) {
-            NVPTXRetarget retarget;
-            auto ptx = retarget.retarget(*mod);
-            if (!ptx) { r.error = "nvptx: " + ptx.error(); return r; }
-            auto ctx_or = gpu::CudaCtx::create(*ptx, "render_tile");
-            if (!ctx_or) { r.error = "cuda: " + ctx_or.error(); return r; }
-            cuda_ctx_ = std::move(*ctx_or);
-            cached_ir_ = ir_text;
+            if (!cuda_ctx_ || ir_text != cached_ir_) {
+                NVPTXRetarget retarget;
+                auto ptx = retarget.retarget(*mod);
+                if (!ptx) { r.error = "nvptx: " + ptx.error(); return r; }
+                auto ctx_or = gpu::CudaCtx::create(*ptx, "render_tile");
+                if (!ctx_or) { r.error = "cuda: " + ctx_or.error(); return r; }
+                cuda_ctx_ = std::move(*ctx_or);
+                cached_ir_ = ir_text;
+            }
+
+            // Runtime parameter buffer in the kernel's slot order. The bindings
+            // carry the values of this codegen, so with a policy installed a
+            // runtime-value edit is just this refresh and the re-upload below,
+            // while the PTX is rebuilt only for a placement / topology /
+            // constant edit (one that changes the IR text).
+            cached_params_.assign(static_cast<std::size_t>(cg.param_slot_count()), 0.0f);
+            for (const auto& b : cg.param_bindings()) cached_params_[b.slot] = b.default_value;
+            cached_key_ = key;
+            have_key_   = true;
         }
         r.compile_ms = std::chrono::duration<double, std::milli>(clk::now() - t_c).count();
 
@@ -145,47 +169,62 @@ public:
         }
         args.fov_scale = view_scale;
 
-        // Runtime parameter buffer in the kernel's slot order. Codegen runs
-        // every frame (cheap), so these carry the current values; the PTX is
-        // rebuilt only when the IR text changes (a placement / topology /
-        // constant edit), whereas a runtime-value edit is just this re-upload.
-        std::vector<float> params(static_cast<std::size_t>(cg.param_slot_count()), 0.0f);
-        for (const auto& b : cg.param_bindings()) params[b.slot] = b.default_value;
-        std::vector<std::uint8_t> full;   // full-frame RGBA8
+        // The context returns the tile's floats directly: no full-frame copy,
+        // no clamp to RGBA8 and back. That round trip quantised every GPU-IR
+        // pixel to 1/255 and cost two passes over the frame per frame.
         auto t_r = clk::now();
-        auto rr = cuda_ctx_->render(args, params, full);
+        auto rr = cuda_ctx_->render(args, cached_params_, r.rgba);
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
         if (!rr) { r.error = "cuda render: " + rr.error(); return r; }
-
-        // Crop tile region, RGBA8 → float.
-        int tw = tile.width(), th = tile.height();
-        r.rgba.assign((std::size_t)tw * th * 4, 0.0f);
-        for (int y = 0; y < th; ++y) {
-            int sy = tile.y0 + y;
-            if (sy < 0 || sy >= H) continue;
-            for (int x = 0; x < tw; ++x) {
-                int sx = tile.x0 + x;
-                if (sx < 0 || sx >= W) continue;
-                std::size_t src = ((std::size_t)sy * W + sx) * 4;
-                std::size_t dst = ((std::size_t)y * tw + x) * 4;
-                if (src + 3 < full.size())
-                    for (int c = 0; c < 4; ++c)
-                        r.rgba[dst + c] = full[src + c] / 255.0f;
-            }
-        }
+        pad_clipped_tile(r.rgba, tile, W, H);
         r.threads_used = 0;
         r.ok = true;
+
+        if (profile_enabled()) {
+            const auto& st = cuda_ctx_->stats();
+            std::fprintf(stderr,
+                "gpu_ir-prof: %-7s compile=%.3f run=%.3f (launch %.3f copy %.3f) total=%.3f ms\n",
+                reuse ? "reuse" : "codegen", r.compile_ms, r.render_ms,
+                st.launch_ms, st.copy_ms,
+                std::chrono::duration<double, std::milli>(clk::now() - t_c).count());
+        }
         return r;
 #endif  // FREP_HAS_CUDA
     }
 
 private:
+    // FREP_EXEC_PROFILE=1 prints one line per frame with the stage split.
+    static bool profile_enabled() {
+        static const bool on = std::getenv("FREP_EXEC_PROFILE") != nullptr;
+        return on;
+    }
+
+    // CudaCtx returns the tile clipped to the frame. The scheduler never asks
+    // for a tile that reaches outside it, but the interface allows one; pad it
+    // with zeros so the result has the tile's own size.
+    static void pad_clipped_tile(std::vector<float>& rgba, const Tile& tile, int W, int H) {
+        const int x0 = std::max(tile.x0, 0), y0 = std::max(tile.y0, 0);
+        const int x1 = std::min(tile.x1, W), y1 = std::min(tile.y1, H);
+        const int cw = std::max(x1 - x0, 0), ch = std::max(y1 - y0, 0);
+        const int tw = tile.width(), th = tile.height();
+        if (cw == tw && ch == th) return;
+        std::vector<float> full((std::size_t)tw * th * 4, 0.0f);
+        for (int y = 0; y < ch; ++y)
+            std::memcpy(&full[(((std::size_t)(y0 - tile.y0 + y)) * tw + (x0 - tile.x0)) * 4],
+                        &rgba[(std::size_t)y * cw * 4],
+                        (std::size_t)cw * 4 * sizeof(float));
+        rgba.swap(full);
+    }
+
     SceneCodegen::SceneSdfMode mode_;
     TracerConfig               cfg_;
 #ifdef FREP_HAS_CUDA
     std::unique_ptr<gpu::CudaCtx> cuda_ctx_;
 #endif
-    std::string cached_ir_;
+    std::string        cached_ir_;        // IR text the current PTX was built from
+    std::size_t        cached_key_ = 0;   // content_hash the kernel was compiled for
+    bool               have_key_   = false;
+    std::vector<float> cached_params_;    // kernel params in slot order, from that codegen
     const CompilePolicy* policy_ = nullptr;
 };
 
