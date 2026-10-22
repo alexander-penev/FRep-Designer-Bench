@@ -1,7 +1,9 @@
 #pragma once
 // core/tracer/tile_scheduler.hpp
 //
-// Distributes the render across tiles between threads using std::jthread + an atomic counter.
+// Distributes the render across tiles between threads: a persistent pool of
+// workers pulls tiles off an atomic counter, and the calling thread works
+// alongside them.
 
 #include "core/compiler/jit_engine.hpp"
 #include "core/frep/scene.hpp"
@@ -10,6 +12,10 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <cstdint>
+#include <functional>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -18,6 +24,8 @@ namespace frep {
 struct RenderParams {
     int width       = 800;
     int height      = 600;
+    // Largest tile edge. The scheduler halves it when a frame would otherwise
+    // have too few tiles for the threads (see render()).
     int tile_size   = 64;
     int num_threads = 0;
 
@@ -115,18 +123,29 @@ public:
             rx1 = std::min(p.width,  p_in.region_x1 * ssaa);
             ry1 = std::min(p.height, p_in.region_y1 * ssaa);
         }
-        for (int ty = ry0; ty < ry1; ty += p.tile_size)
-            for (int tx = rx0; tx < rx1; tx += p.tile_size)
+        // Tile granularity. A 512² frame in 64-px tiles is 64 tiles for 56
+        // threads: the frame then takes as long as the slowest tile, and the
+        // measured scaling collapsed past 16 threads (24–45% of the machine
+        // at 56). Halve the tile until there are at least four per thread, so
+        // the tail at the end of the frame is one small tile, not a large one.
+        // The floor of 16 px keeps the per-tile call overhead negligible.
+        int tile = std::max(1, p.tile_size);
+        auto tile_count = [&](int ts) {
+            return (long)((rx1 - rx0 + ts - 1) / ts) * ((ry1 - ry0 + ts - 1) / ts);
+        };
+        while (tile > 16 && tile_count(tile) < 4L * n_threads) tile /= 2;
+        for (int ty = ry0; ty < ry1; ty += tile)
+            for (int tx = rx0; tx < rx1; tx += tile)
                 tiles.push_back({
                     tx, ty,
-                    std::min(p.tile_size, rx1 - tx),
-                    std::min(p.tile_size, ry1 - ty)
+                    std::min(tile, rx1 - tx),
+                    std::min(tile, ry1 - ty)
                 });
 
         std::atomic<int> next{0};
         const int total = static_cast<int>(tiles.size());
 
-        auto worker = [&]() {
+        std::function<void()> worker = [&]() {
             while (true) {
                 int i = next.fetch_add(1, std::memory_order_relaxed);
                 if (i >= total) break;
@@ -141,12 +160,7 @@ public:
                    params);
             }
         };
-
-        {
-            std::vector<std::jthread> ts;
-            ts.reserve(n_threads);
-            for (int i = 0; i < n_threads; ++i) ts.emplace_back(worker);
-        }  // jthreads join here.
+        pool().run(std::min(n_threads, total > 0 ? total : 1), worker);
 
         // ── Downsample if SSAA was active ────────────────────────────────────
         if (ssaa > 1) {
@@ -182,6 +196,89 @@ public:
                 }
             }
         }
+    }
+
+private:
+    // One pool for the process, sized to the hardware. Each frame used to
+    // spawn its own threads and join them — 56 thread creations per frame on
+    // this machine, around a millisecond, which is the whole frame for a
+    // simple scene at 512². The workers sleep on a condition variable between
+    // frames; run() wakes the first n-1 of them, does its own share of the
+    // tiles on the calling thread, and returns when every helper has finished.
+    // Frames are serialised through call_mutex_, so two callers rendering at
+    // once take turns rather than interleave jobs.
+    class Pool {
+    public:
+        Pool() {
+            int hw = static_cast<int>(std::thread::hardware_concurrency());
+            n_workers_ = std::max(0, hw - 1);
+            workers_.reserve(n_workers_);
+            for (int i = 0; i < n_workers_; ++i)
+                workers_.emplace_back([this, i] { worker_main(i); });
+        }
+        ~Pool() {
+            { std::lock_guard<std::mutex> lk(m_); stop_ = true; }
+            cv_.notify_all();
+            for (auto& t : workers_) t.join();
+        }
+
+        void run(int n_threads, const std::function<void()>& job) {
+            std::lock_guard<std::mutex> call_lock(call_mutex_);
+            const int helpers = std::clamp(n_threads - 1, 0, n_workers_);
+            if (helpers > 0) {
+                {
+                    std::lock_guard<std::mutex> lk(m_);
+                    job_ = &job;
+                    active_ = helpers;
+                    pending_ = helpers;
+                    ++generation_;
+                }
+                cv_.notify_all();
+            }
+            job();
+            if (helpers > 0) {
+                std::unique_lock<std::mutex> lk(m_);
+                done_cv_.wait(lk, [&] { return pending_ == 0; });
+                job_ = nullptr;
+            }
+        }
+
+    private:
+        void worker_main(int idx) {
+            std::uint64_t seen = 0;
+            while (true) {
+                const std::function<void()>* job = nullptr;
+                {
+                    std::unique_lock<std::mutex> lk(m_);
+                    cv_.wait(lk, [&] { return stop_ || generation_ != seen; });
+                    if (stop_) return;
+                    seen = generation_;
+                    if (idx >= active_) continue;   // this frame uses fewer threads
+                    job = job_;
+                }
+                (*job)();
+                {
+                    std::lock_guard<std::mutex> lk(m_);
+                    if (--pending_ == 0) done_cv_.notify_one();
+                }
+            }
+        }
+
+        std::mutex                 call_mutex_;
+        std::mutex                 m_;
+        std::condition_variable    cv_, done_cv_;
+        std::vector<std::thread>   workers_;
+        int                        n_workers_  = 0;
+        int                        active_     = 0;
+        int                        pending_    = 0;
+        std::uint64_t              generation_ = 0;
+        bool                       stop_       = false;
+        const std::function<void()>* job_ = nullptr;
+    };
+
+    static Pool& pool() {
+        static Pool p;
+        return p;
     }
 };
 

@@ -49,14 +49,16 @@ public:
         r.tile = tile;
         r.path = PathKind::CpuIr;
 
-        // Compile (codegen + JIT), cached on the scene's structure hash so
-        // repeated renders of the same topology — e.g. a calibration probe
+        // Compile (codegen + JIT), cached on the scene's content hash so
+        // repeated renders of the same scene — e.g. a calibration probe
         // followed by the real band, or successive frames — reuse the JIT'd
         // function instead of recompiling. Compile dominates wall-time, so
         // this is what makes the weighted split's calibration pass nearly
-        // free. A topology change invalidates the cache.
+        // free. Anything codegen bakes in (geometry, parameter values,
+        // materials, visibility, lights) invalidates the cache; keying on the
+        // structure alone served a stale image after a parameter edit.
         auto t_c = clk::now();
-        const std::size_t shash = scene.structure_hash();
+        const std::size_t shash = scene.content_hash();
         if (!cached_fn_ || shash != cached_structure_hash_) {
             auto ctx = std::make_unique<llvm::LLVMContext>();
             TracerConfig cfg = cfg_;
@@ -85,12 +87,29 @@ public:
         // Render only the tile's region (the JIT'd render_tile is natively
         // tile-addressed; RenderParams::region restricts which tiles run, so
         // a sub-frame costs proportionally less — no whole-frame waste).
-        // We still allocate a full-frame buffer so tile coordinates map
-        // directly, then copy out the region; only the region is computed.
-        // Uninitialized on purpose: the scheduler fully writes every region
-        // pixel and only the region is copied out, so zero-filling W*H*4
-        // floats (tens of MB at high resolution) would be pure per-frame waste.
-        std::unique_ptr<float[]> full(new float[(std::size_t)W * H * 4]);
+        //
+        // When the tile is the whole frame — the single-path and benchmark
+        // case — render straight into the result: the scheduler writes every
+        // pixel of its region, so there is nothing to copy out. The full-frame
+        // scratch buffer this used to go through was allocated, page-faulted
+        // in by every worker thread at once, copied and freed on each frame,
+        // which at 512² cost more than the render of a simple scene. A
+        // sub-frame tile still renders through a full-frame buffer so tile
+        // coordinates map directly, but that buffer now lives across frames.
+        const int tw = tile.width(), th = tile.height();
+        const bool whole = tile.x0 == 0 && tile.y0 == 0 && tw == W && th == H;
+        float* target = nullptr;
+        if (whole) {
+            r.rgba.resize((std::size_t)W * H * 4);
+            target = r.rgba.data();
+        } else {
+            const std::size_t need = (std::size_t)W * H * 4;
+            if (full_size_ != need) {
+                full_.reset(new float[need]);
+                full_size_ = need;
+            }
+            target = full_.get();
+        }
         RenderParams rp; rp.width = W; rp.height = H;
         rp.region_x0 = tile.x0; rp.region_y0 = tile.y0;
         rp.region_x1 = tile.x1; rp.region_y1 = tile.y1;
@@ -103,29 +122,31 @@ public:
         r.threads_used = rp.num_threads > 0
             ? rp.num_threads : (int)std::thread::hardware_concurrency();
         auto t_r = clk::now();
-        TileScheduler::render(*fn, full.get(), scene.camera(), rp);
+        TileScheduler::render(*fn, target, scene.camera(), rp);
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
 
-        // Copy the tile region into the result buffer. Row-wise memcpy when
-        // the tile is fully inside the frame (the common band/tile case).
-        int tw = tile.width(), th = tile.height();
-        if (tile.x0 >= 0 && tile.y0 >= 0 && tile.x1 <= W && tile.y1 <= H) {
-            r.rgba.resize((std::size_t)tw * th * 4);
-            for (int y = 0; y < th; ++y)
-                std::memcpy(&r.rgba[(std::size_t)y * tw * 4],
-                            &full[((std::size_t)(tile.y0 + y) * W + tile.x0) * 4],
-                            (std::size_t)tw * 4 * sizeof(float));
-        } else {
-            r.rgba.assign((std::size_t)tw * th * 4, 0.0f);
-            for (int y = 0; y < th; ++y) {
-                int sy = tile.y0 + y;
-                if (sy < 0 || sy >= H) continue;
-                for (int x = 0; x < tw; ++x) {
-                    int sx = tile.x0 + x;
-                    if (sx < 0 || sx >= W) continue;
-                    std::size_t src = ((std::size_t)sy * W + sx) * 4;
-                    std::size_t dst = ((std::size_t)y * tw + x) * 4;
-                    for (int c = 0; c < 4; ++c) r.rgba[dst + c] = full[src + c];
+        if (!whole) {
+            const float* full = full_.get();
+            // Copy the tile region into the result buffer. Row-wise memcpy when
+            // the tile is fully inside the frame (the common band/tile case).
+            if (tile.x0 >= 0 && tile.y0 >= 0 && tile.x1 <= W && tile.y1 <= H) {
+                r.rgba.resize((std::size_t)tw * th * 4);
+                for (int y = 0; y < th; ++y)
+                    std::memcpy(&r.rgba[(std::size_t)y * tw * 4],
+                                &full[((std::size_t)(tile.y0 + y) * W + tile.x0) * 4],
+                                (std::size_t)tw * 4 * sizeof(float));
+            } else {
+                r.rgba.assign((std::size_t)tw * th * 4, 0.0f);
+                for (int y = 0; y < th; ++y) {
+                    int sy = tile.y0 + y;
+                    if (sy < 0 || sy >= H) continue;
+                    for (int x = 0; x < tw; ++x) {
+                        int sx = tile.x0 + x;
+                        if (sx < 0 || sx >= W) continue;
+                        std::size_t src = ((std::size_t)sy * W + sx) * 4;
+                        std::size_t dst = ((std::size_t)y * tw + x) * 4;
+                        for (int c = 0; c < 4; ++c) r.rgba[dst + c] = full[src + c];
+                    }
                 }
             }
         }
@@ -139,12 +160,15 @@ private:
     SceneCodegen::SceneSdfMode mode_;
     TracerConfig cfg_;
     // Compile cache: the JIT engine (owns the executable memory) and the
-    // function pointer into it, keyed on the scene structure hash. Reused
-    // across renders of the same topology so calibration + real render — and
+    // function pointer into it, keyed on the scene content hash. Reused
+    // across renders of the same scene so calibration + real render — and
     // successive frames — don't recompile.
     std::unique_ptr<JitEngine> jit_;
     RenderTileFn               cached_fn_ = nullptr;
     std::size_t                cached_structure_hash_ = 0;
+    // Full-frame buffer for sub-frame tiles (see render()).
+    std::unique_ptr<float[]>   full_;
+    std::size_t                full_size_ = 0;
 
     static std::size_t peak_rss_kb() {
         std::ifstream f("/proc/self/status");
