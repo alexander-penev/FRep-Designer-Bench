@@ -147,8 +147,10 @@ public:
         r.ok = true;
 
         if (profile_enabled())
-            std::fprintf(stderr, "gpu_glsl-prof: %-5s compile=%.3f run=%.3f total=%.3f ms\n",
+            std::fprintf(stderr, "gpu_glsl-prof: %-5s compile=%.3f run=%.3f "
+                "(record %.3f wait %.3f readback %.3f) total=%.3f ms\n",
                 reuse ? "reuse" : "emit", r.compile_ms, r.render_ms,
+                st.record_ms, st.gpu_wait_ms, st.readback_ms,
                 std::chrono::duration<double, std::milli>(clk::now() - t_c).count());
         return r;
     }

@@ -11,6 +11,7 @@
 
 #include "core/gpu/rtx_pipeline.hpp"
 #include "core/gpu/rgba_unpack.hpp"
+#include "core/gpu/vk_fence_wait.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -732,7 +733,7 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     }
     auto t_trace0 = clk::now();
     vkQueueSubmit(ctx.queue(), 1, &si, fence);
-    vkWaitForFences(dev, 1, &fence, VK_TRUE, ~0ull);
+    wait_fence(dev, fence);   // spins before blocking, see vk_fence_wait.hpp
     auto t_trace1 = clk::now();
 
     // ── Readback ────────────────────────────────────────────────────────────
@@ -1192,7 +1193,7 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     }
     auto t_trace0 = clk::now();
     vkQueueSubmit(ctx.queue(), 1, &si, fence);
-    vkWaitForFences(dev, 1, &fence, VK_TRUE, ~0ull);
+    wait_fence(dev, fence);   // spins before blocking, see vk_fence_wait.hpp
     auto t_trace1 = clk::now();
 
     RtRenderResult out;

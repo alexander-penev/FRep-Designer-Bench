@@ -246,11 +246,22 @@ A/B against the backend-only lowering.
 
 Where a frame's time goes, per path, outside the kernel: `FREP_EXEC_PROFILE=1`
 prints one line per frame from the GPU-IR and GPU-GLSL executors (whether
-codegen/emit was skipped, compile, run, and for CUDA the launch and readback
-split); `FREP_RTX_PROFILE=1` does the same for the RT path. The benchmark
-`frep4_pathcost` separates `run` (the executor's own timer) from `wall` (the
-whole `render()` call) — the difference is host work the executor does around
-the GPU — and `FREP_PATHS=gpu_ir,gpu_rtx` restricts a run to the named paths.
+codegen/emit was skipped, compile, run, and the launch / submit-to-signal /
+readback split inside run); `FREP_RTX_PROFILE=1` does the same for the RT
+path. The benchmark `frep4_pathcost` separates `run` (the executor's own
+timer) from `wall` (the whole `render()` call) — the difference is host work
+the executor does around the GPU — and `FREP_PATHS=gpu_ir,gpu_rtx` restricts a
+run to the named paths.
+
+Two things to know before trusting a sub-millisecond GPU number. The Vulkan
+paths spin on the frame fence before they block (`core/gpu/vk_fence_wait.hpp`):
+with a plain blocking wait the core idles between frames, the frequency
+governor lowers its clock, and the same frame measures two to three times
+longer and drifts over a run; `FREP_VK_WAIT=block` restores the blocking wait
+for a comparison. And `frep4_pathcost` warms each path for a time window
+(`FREP_WARM_MS`, default 500 ms) before it times anything, because the GPU's
+boost clock takes a few hundred milliseconds to ramp from idle and three
+frames of a sub-millisecond path would measure the ramp.
 
 For frame-level CPU profiling, `perf` samples the JIT'd code but cannot
 name it: the ORC JIT here registers no perf map, so samples inside

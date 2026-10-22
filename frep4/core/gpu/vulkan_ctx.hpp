@@ -126,6 +126,13 @@ struct GpuRenderStats {
     double      render_ms = 0;   // dispatch + wait + readback
     int         width    = 0;
     int         height   = 0;
+    // Where render_ms went, per frame: recording the command buffer (host),
+    // submit until the fence is signalled (the GPU's work plus the dispatch
+    // and wake-up latency around it), and mapping + converting the staging
+    // buffer (host). The executors print these under FREP_EXEC_PROFILE=1.
+    double      record_ms   = 0;
+    double      gpu_wait_ms = 0;
+    double      readback_ms = 0;
 
     // Breakdown of init_ms into its phases. The pipeline phase is the
     // prime suspect for the init blow-up on large shaders: it's where the

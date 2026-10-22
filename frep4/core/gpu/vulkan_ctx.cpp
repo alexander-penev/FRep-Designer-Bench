@@ -38,6 +38,7 @@
 
 #include "core/gpu/vulkan_ctx.hpp"
 #include "core/gpu/rgba_unpack.hpp"
+#include "core/gpu/vk_fence_wait.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -761,14 +762,17 @@ VulkanCtx::render_impl(const ShaderPush& push, Sink&& sink)
 
     VK_TRY(vkEndCommandBuffer(I.cmd_buf));
 
-    // Submit + wait.
+    // Submit + wait. The wait spins before it blocks (see vk_fence_wait.hpp):
+    // a blocking wait's wake-up latency was most of a short frame here.
     vkResetFences(I.device, 1, &I.fence);
     VkSubmitInfo si{};
     si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers    = &I.cmd_buf;
+    auto t_submit = std::chrono::steady_clock::now();
     VK_TRY(vkQueueSubmit(I.compute_queue, 1, &si, I.fence));
-    VK_TRY(vkWaitForFences(I.device, 1, &I.fence, VK_TRUE, ~0ULL));
+    VK_TRY(wait_fence(I.device, I.fence, spin_budget_ms(stats_.gpu_wait_ms)));
+    auto t_done = std::chrono::steady_clock::now();
 
     // Map and hand over. The staging buffer holds the tile tightly packed, so
     // the caller's buffer is tile-sized (tw*th*4) — equal to the full frame
@@ -780,9 +784,13 @@ VulkanCtx::render_impl(const ShaderPush& push, Sink&& sink)
     vkUnmapMemory(I.device, I.staging_mem);
 
     auto t1 = std::chrono::steady_clock::now();
+    using ms = std::chrono::duration<double, std::milli>;
     stats_.width  = w;
     stats_.height = h;
-    stats_.render_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    stats_.render_ms   = ms(t1 - t0).count();
+    stats_.record_ms   = ms(t_submit - t0).count();
+    stats_.gpu_wait_ms = ms(t_done - t_submit).count();
+    stats_.readback_ms = ms(t1 - t_done).count();
     return {};
 }
 
