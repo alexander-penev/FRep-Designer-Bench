@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -33,6 +34,21 @@ static double med(std::vector<double> v) {
     if (v.empty()) return 0;
     std::sort(v.begin(), v.end());
     return v[v.size() / 2];
+}
+
+// FREP_PATHS=cpu_ir,gpu_rtx restricts a run to the named paths, so one path can
+// be profiled or A/B-tested without the others warming the machine first.
+static bool path_selected(const char* name) {
+    const char* only = std::getenv("FREP_PATHS");
+    if (!only || !*only) return true;
+    std::string list = only, want = name;
+    for (std::size_t b = 0; b <= list.size();) {
+        std::size_t e = list.find(',', b);
+        if (e == std::string::npos) e = list.size();
+        if (list.compare(b, e - b, want) == 0) return true;
+        b = e + 1;
+    }
+    return false;
 }
 
 int main(int argc, char** argv) {
@@ -122,6 +138,7 @@ int main(int argc, char** argv) {
 
     for (PathKind pk : paths) {
         const char* name = path_kind_name(pk);
+        if (!path_selected(name)) continue;
         TracerConfig cfg;
         if (geometry_only) {
             cfg.enable_shadows  = false;
@@ -140,6 +157,21 @@ int main(int argc, char** argv) {
         double build_ms = first.compile_ms;
 
         std::vector<double> run_ms, wall_ms, warmbuild_ms;
+        // Warm up by time, not by frame count, before timing. The GPU's boost
+        // clock takes a few hundred milliseconds to ramp from idle, and three
+        // frames of a sub-millisecond path measure the ramp, not the path —
+        // the same build came out 20% apart in back-to-back runs before this.
+        // FREP_WARM_MS overrides the window (0 keeps only the WARM frames).
+        {
+            double warm_ms = 500.0;
+            if (const char* s = std::getenv("FREP_WARM_MS")) warm_ms = std::atof(s);
+            auto w0 = std::chrono::steady_clock::now();
+            while (std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - w0).count() < warm_ms) {
+                TileResult r = exec->render(scene, R, R, full);
+                if (!r.ok) break;
+            }
+        }
         // Energy over the timed iterations only. CPU package and GPU are kept
         // apart on purpose: on an idle-heavy host the package draws ~80 W
         // regardless, so lumping it in would price a GPU path by how long the
