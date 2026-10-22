@@ -265,7 +265,10 @@ TEST(RtxGroupShaders, PerGroupIntersectionsEvaluateOwnSubtree) {
     ASSERT_TRUE(rs) << (rs ? "" : rs.error());
     EXPECT_EQ(rs->rint_per_group.size(), 3u);
     EXPECT_FALSE(rs->rgen.empty());
-    EXPECT_FALSE(rs->rchit.empty());
+    // The closest-hit stage is either one shared shader or one per group
+    // (the per-group form carries the hit normal in the intersection's
+    // attribute and shades from it); either way something must shade.
+    EXPECT_TRUE(!rs->rchit.empty() || !rs->rchit_per_group.empty());
 
     // Each group's intersection shader must differ (different translated SDF),
     // proving it evaluates only its own sphere, not the full union.
