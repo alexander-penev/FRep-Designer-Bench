@@ -237,10 +237,29 @@ For LLVM IR inspection:
 For GLSL inspection (saved to `/tmp/frep_glsl_<pid>_*.spv` by default
 via `frep_dump --paths gpu_glsl`, which writes the `.glsl` and `.spv`).
 
-For frame-level CPU profiling, `perf` works on the JIT'd code — Orc
-emits symbol info that `perf report` can map. For GPU profiling on
-real hardware use `renderdoc` or the vendor's profiler (NVIDIA Nsight,
-AMD RGP).
+For the PTX the GPU-IR path hands to the CUDA driver, set
+`FREP_DUMP_PTX=/tmp/scene.ptx` and run any GPU-IR render; `ptxas -arch=sm_75
+-v /tmp/scene.ptx` then reports registers, spills and local-frame size.
+`FREP_NVPTX_ARCH=sm_75` overrides the PTX target (default `sm_50`), and
+`FREP_NVPTX_NO_O3=1` skips the middle-end pipeline on the GPU module for an
+A/B against the backend-only lowering.
+
+Where a frame's time goes, per path, outside the kernel: `FREP_EXEC_PROFILE=1`
+prints one line per frame from the GPU-IR and GPU-GLSL executors (whether
+codegen/emit was skipped, compile, run, and for CUDA the launch and readback
+split); `FREP_RTX_PROFILE=1` does the same for the RT path. The benchmark
+`frep4_pathcost` separates `run` (the executor's own timer) from `wall` (the
+whole `render()` call) — the difference is host work the executor does around
+the GPU — and `FREP_PATHS=gpu_ir,gpu_rtx` restricts a run to the named paths.
+
+For frame-level CPU profiling, `perf` samples the JIT'd code but cannot
+name it: the ORC JIT here registers no perf map, so samples inside
+`render_tile` show as raw addresses (calls into libm and the kernel are
+still named). Compare counters and A/B runs instead, or inspect the IR
+offline: `frep_dump` writes the pre- and post-O3 `.ll`, and `llc
+-mcpu=<host>` on the latter shows what the JIT compiles. For GPU
+profiling on real hardware use `renderdoc` or the vendor's profiler
+(NVIDIA Nsight, AMD RGP).
 
 ---
 

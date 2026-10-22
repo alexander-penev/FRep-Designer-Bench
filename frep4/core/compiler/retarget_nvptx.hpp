@@ -14,14 +14,27 @@
 // The pipeline:
 //   1. Set the target triple to nvptx64-nvidia-cuda.
 //   2. Mark render_tile as a CUDA kernel (calling convention + the
-//      nvvm.annotations "kernel" metadata the backend recognises).
-//   3. Lower to PTX text via TargetMachine (AssemblyFile).
+//      nvvm.annotations "kernel" metadata the backend recognises), give its
+//      pointer arguments the aliasing facts the launch guarantees, and make
+//      every helper internal so the optimiser may inline and drop it.
+//   3. Run the standard O3 pipeline against the NVPTX TargetMachine. The CPU
+//      path's JIT does this before native codegen; here it was skipped, so
+//      the PTX kept every helper as an ABI call with its out-parameters in
+//      local memory — 21 calls and a 64-byte frame per pixel on colonnade.
+//   4. Lower to PTX text via TargetMachine (AssemblyFile).
 //
 // The PTX is text; the CUDA driver JITs it to SASS for the actual GPU at
 // module-load time, so it is portable across NVIDIA architectures.
+//
+// Knobs (environment): FREP_NVPTX_ARCH overrides the PTX target (default
+// sm_50); FREP_NVPTX_NO_O3=1 skips step 3 for an A/B; FREP_DUMP_PTX=<file>
+// writes the PTX out, for `ptxas -v` register and spill counts.
 
 #include "core/compiler/llvm_compat.hpp"
 
+#include <llvm/Analysis/CGSCCPassManager.h>
+#include <llvm/Analysis/LoopAnalysisManager.h>
+#include <llvm/IR/Attributes.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Metadata.h>
@@ -30,12 +43,16 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/IntrinsicsNVPTX.h>   // llvm.nvvm.lg2.approx.f / ex2.approx
+#include <llvm/IR/PassManager.h>
 #include <llvm/MC/TargetRegistry.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/TargetParser/Triple.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <cstdlib>
 #include <expected>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
@@ -193,10 +210,13 @@ inline void lower_transcendentals(llvm::Module& mod) {
 
 class NVPTXRetarget {
 public:
-    // GPU compute capability target. sm_61 = Pascal (GTX 10-series). The
-    // CUDA driver re-JITs PTX for the actual device, so a slightly lower
-    // target still runs on newer GPUs; keep it conservative.
-    explicit NVPTXRetarget(std::string arch = "sm_50") : arch_(std::move(arch)) {}
+    // GPU compute capability target. The CUDA driver re-JITs PTX for the
+    // actual device, so a lower target still runs on newer GPUs; sm_50 is the
+    // conservative default. FREP_NVPTX_ARCH overrides it (e.g. sm_75 for a
+    // Turing card, to let the PTX use that generation's instructions).
+    explicit NVPTXRetarget(std::string arch = "sm_50") : arch_(std::move(arch)) {
+        if (const char* a = std::getenv("FREP_NVPTX_ARCH"); a && *a) arch_ = a;
+    }
 
     std::string last_error;
 
@@ -208,7 +228,10 @@ public:
 
         // Mark render_tile as a kernel: PTX kernel calling convention + the
         // nvvm.annotations entry the backend reads to emit `.entry`.
-        if (auto* fn = mod.getFunction("render_tile")) {
+        llvm::Function* kernel = mod.getFunction("render_tile");
+        if (!kernel) return std::unexpected("module has no render_tile function");
+        {
+            auto* fn = kernel;
             fn->setCallingConv(llvm::CallingConv::PTX_Kernel);
             fn->setLinkage(llvm::Function::ExternalLinkage);
             fn->removeFnAttr(llvm::Attribute::AlwaysInline);
@@ -222,15 +245,33 @@ public:
                     llvm::ConstantInt::get(llvm::Type::getInt32Ty(C), 1)),
             };
             ann->addOperand(llvm::MDNode::get(C, ops));
-        } else {
-            return std::unexpected("module has no render_tile function");
+
+            // What the launch guarantees about the kernel's pointers: the
+            // output image and the parameter buffer are distinct allocations,
+            // and the kernel only reads the parameters. Without these the
+            // optimiser must assume a pixel store may change a parameter, and
+            // reloads every parameter after every store.
+            const unsigned n = fn->arg_size();
+            if (n >= 2 && fn->getArg(0)->getType()->isPointerTy())
+                fn->addParamAttr(0, llvm::Attribute::NoAlias);
+            if (n >= 2 && fn->getArg(n - 1)->getType()->isPointerTy()) {
+                fn->addParamAttr(n - 1, llvm::Attribute::NoAlias);
+                fn->addParamAttr(n - 1, llvm::Attribute::ReadOnly);
+            }
         }
 
-        // Replace transcendental intrinsics (sin/cos/exp/log/pow) the NVPTX
-        // backend can't select with libdevice __nv_* calls the CUDA driver
-        // resolves at JIT time. Without this, any sin/cos node (twist, bend,
-        // rotate) fails with "Cannot select: fsin".
-        nvptx_detail::lower_transcendentals(mod);
+        // Everything but the kernel is an implementation detail of this
+        // module: make it internal so the inliner may absorb it and GlobalDCE
+        // may drop what is left, instead of emitting every helper as its own
+        // .func. The CPU build keeps the instance subprograms NoInline so one
+        // body serves every instance (compile time, code size); on the GPU a
+        // call means .param marshalling and a local frame inside every march
+        // step, so let the inliner decide here — as the RT path already does.
+        for (auto& f : mod) {
+            if (&f == kernel || f.isDeclaration()) continue;
+            f.setLinkage(llvm::Function::InternalLinkage);
+            f.removeFnAttr(llvm::Attribute::NoInline);
+        }
 
         std::string err;
         llvm::Triple T(triple);
@@ -244,14 +285,42 @@ public:
         std::unique_ptr<llvm::TargetMachine> tm(
 #if LLVM_VERSION_MAJOR >= 22
             tgt->createTargetMachine(T, arch_, "", llvm::TargetOptions{},
-                                     std::optional<llvm::Reloc::Model>())
+                                     std::optional<llvm::Reloc::Model>(),
+                                     std::nullopt, llvm::CodeGenOptLevel::Aggressive)
 #else
             tgt->createTargetMachine(triple, arch_, "", llvm::TargetOptions{},
-                                     std::optional<llvm::Reloc::Model>())
+                                     std::optional<llvm::Reloc::Model>(),
+                                     std::nullopt, llvm::CodeGenOptLevel::Aggressive)
 #endif
         );
         if (!tm) return std::unexpected("could not create NVPTX TargetMachine");
         mod.setDataLayout(tm->createDataLayout());
+
+        // The middle end, with the NVPTX cost model. Before this the GPU
+        // module went straight to the backend: no inlining, no GVN across the
+        // three gradient evaluations, no hoisting of parameter loads out of
+        // the march loop. No fast-math flags are set anywhere in codegen, so
+        // O3 reassociates nothing and the pixels stay bit-identical.
+        if (!std::getenv("FREP_NVPTX_NO_O3")) {
+            llvm::PassBuilder             pb(tm.get());
+            llvm::LoopAnalysisManager     lam;
+            llvm::FunctionAnalysisManager fam;
+            llvm::CGSCCAnalysisManager    cgam;
+            llvm::ModuleAnalysisManager   mam;
+            pb.registerModuleAnalyses(mam);
+            pb.registerCGSCCAnalyses(cgam);
+            pb.registerFunctionAnalyses(fam);
+            pb.registerLoopAnalyses(lam);
+            pb.crossRegisterProxies(lam, fam, cgam, mam);
+            pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3).run(mod, mam);
+        }
+
+        // Replace transcendental intrinsics (sin/cos/exp/log/pow) the NVPTX
+        // backend can't select with the NVVM approximations the hardware has.
+        // Without this, any sin/cos node (twist, bend, rotate) fails with
+        // "Cannot select: fsin". After O3, so that whatever the optimiser
+        // folded or introduced (pow → exp2/log2) is lowered too.
+        nvptx_detail::lower_transcendentals(mod);
 
         llvm::SmallVector<char, 0> buf;
         llvm::raw_svector_ostream os(buf);
@@ -262,6 +331,10 @@ public:
         pm.run(mod);
         if (buf.empty()) return std::unexpected("NVPTX produced empty PTX");
 
+        if (const char* dump = std::getenv("FREP_DUMP_PTX"); dump && *dump) {
+            std::ofstream f(dump, std::ios::binary);
+            f.write(buf.data(), (std::streamsize)buf.size());
+        }
         return std::string(buf.begin(), buf.end());
     }
 
