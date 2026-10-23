@@ -48,7 +48,7 @@ public:
     // runtime-placed parameters are read from the kernel's `params` buffer, so
     // editing them re-uploads the buffer instead of rebuilding the PTX. Not
     // owned; must outlive the executor.
-    void set_compile_policy(const CompilePolicy* p) { policy_ = p; have_key_ = false; }
+    void set_compile_policy(const CompilePolicy* p) override { policy_ = p; have_key_ = false; }
 
     PathKind path() const override { return PathKind::GpuIr; }
 #ifdef FREP_HAS_CUDA

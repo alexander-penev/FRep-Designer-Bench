@@ -22,6 +22,7 @@
 
 #include "core/exec/multipath.hpp"
 #include "core/frep/scene.hpp"
+#include "core/frep/scene_bounds.hpp"
 #include "core/gpu/rtx_caps.hpp"
 #include "core/gpu/rtx_ctx.hpp"
 #include "core/gpu/rtx_accel.hpp"
@@ -237,10 +238,17 @@ public:
                 tex_pixels_ = shaders->texture_pixels;
                 mesh_voxels_ = shaders->mesh_voxels;
 
-                FRepNode::AABB box = scene_bounds(scene);
-                const float m = 0.05f;
-                box.min_x -= m; box.min_y -= m; box.min_z -= m;
-                box.max_x += m; box.max_y += m; box.max_z += m;
+                // The same box the compute and IR paths clip their march to
+                // (scene_bounds.hpp), so the BVH gate and the intersection
+                // shader's clip agree with them. An unbounded scene keeps the
+                // old wide box.
+                FRepNode::AABB box{};
+                if (!scene_clip_box(scene, box)) {
+                    box = scene_bounds(scene);
+                    const float m = 0.05f;
+                    box.min_x -= m; box.min_y -= m; box.min_z -= m;
+                    box.max_x += m; box.max_y += m; box.max_z += m;
+                }
                 auto accel = gpu::RtAccel::build_whole_scene(*ctx_, box);
                 if (!accel) { r.error = "gpu_rtx: " + accel.error(); return r; }
                 accel_ = std::make_unique<gpu::RtAccel>(std::move(*accel));

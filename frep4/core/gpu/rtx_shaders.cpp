@@ -14,6 +14,9 @@
 
 #include "core/gpu/rtx_shaders.hpp"
 #include "core/gpu/glsl_emitter.hpp"
+#include "core/frep/scene_bounds.hpp"
+
+#include <cstdio>
 
 #include <sstream>
 #include <vector>
@@ -128,7 +131,8 @@ inline std::string emit_intersection(const char* hdr, const std::string& push,
                                      const std::string& shared,
                                      const TracerConfig& cfg,
                                      bool object_space = false,
-                                     bool carry_normal = false) {
+                                     bool carry_normal = false,
+                                     const FRepNode::AABB* clip_box = nullptr) {
     std::ostringstream s;
     s << hdr << push << shared;
     if (carry_normal)
@@ -154,6 +158,33 @@ inline std::string emit_intersection(const char* hdr, const std::string& push,
       << "    float tmax = min(gl_RayTmaxEXT, " << cfg.max_dist << ");\n"
       // Distance thresholds live in the space we march in.
       << "    float eps = " << cfg.epsilon << " * sc;\n";
+    // The whole-scene ray-box clip the compute and IR paths march within
+    // (scene_bounds.hpp), so this path's march starts at the same t as theirs
+    // and converges to the same hit: the BVH only gates which rays reach this
+    // shader, it does not narrow where they start. World space only; a group
+    // or instance marches its own box in object space.
+    if (clip_box && !object_space) {
+        // Same literal formatting as the compute emitter's flit(), so both
+        // shaders clip at bit-identical planes.
+        auto lit = [](float v) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.9g", v);
+            std::string r(buf);
+            if (r.find('.') == std::string::npos && r.find('e') == std::string::npos) r += ".0";
+            return r;
+        };
+        s << "    {\n"
+          << "        vec3 inv = 1.0 / rd;\n"
+          << "        vec3 t1 = (vec3(" << lit(clip_box->min_x) << ", " << lit(clip_box->min_y) << ", "
+          << lit(clip_box->min_z) << ") - ro) * inv;\n"
+          << "        vec3 t2 = (vec3(" << lit(clip_box->max_x) << ", " << lit(clip_box->max_y) << ", "
+          << lit(clip_box->max_z) << ") - ro) * inv;\n"
+          << "        vec3 tmn = min(t1, t2);\n"
+          << "        vec3 tmx = max(t1, t2);\n"
+          << "        t    = max(t, max(max(tmn.x, tmn.y), tmn.z));\n"
+          << "        tmax = min(tmax, min(min(tmx.x, tmx.y), tmx.z));\n"
+          << "    }\n";
+    }
     // Interval pre-skip (the RTX analog of the compute path's tile cull): bound
     // the field over the AABB of this ray's [t,tmax] segment; if the interval
     // doesn't straddle 0 the surface can't be in this segment, so skip the whole
@@ -443,7 +474,11 @@ emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg_in) {
     }
 
     // ── Intersection: sphere-trace scene_sdf inside the AABB ────────────────
-    set.rint = emit_intersection(hdr, push, shared_block, cfg);
+    // The whole-scene clip box, when the scene has one (scene_bounds.hpp).
+    FRepNode::AABB clip{};
+    const bool clipped = cfg.bbox_clip && scene_clip_box(scene, clip);
+    set.rint = emit_intersection(hdr, push, shared_block, cfg, false, false,
+                                 clipped ? &clip : nullptr);
 
     // ── Closest hit: normal + shade ─────────────────────────────────────────
     {

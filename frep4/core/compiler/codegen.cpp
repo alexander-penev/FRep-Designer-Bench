@@ -11,6 +11,7 @@
 #include "core/compiler/bvh.hpp"
 #include "core/frep/operations.hpp"
 #include "core/frep/primitives.hpp"
+#include "core/frep/scene_bounds.hpp"
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
@@ -1155,42 +1156,11 @@ llvm::Function* SceneCodegen::emit_tracer(const SceneGraph& scene,
     // near/far clip below. If any visible object is unbounded (planes, unknown
     // implicits report an infinite AABB), the clip is disabled — an infinite box
     // can't narrow anything. Computed once here; the march uses it per ray.
-    bool scene_bounded = false;
+    // The box every path shares (scene_bounds.hpp); FREP_BBOX_CLIP=0 turns the
+    // clip off there for an A/B against the plain march.
     FRepNode::AABB scene_box{};
-    {
-        // AABB::infinite() is ±1e9, which std::isfinite accepts; a box that
-        // large is no bound. Anything past 1e8 counts as unbounded.
-        auto finite = [](float v){ return std::isfinite(v) && std::fabs(v) < 1e8f; };
-        for (auto& [id, obj] : scene.objects()) {
-            if (!obj.visible || !obj.geometry) continue;
-            FRepNode::AABB b = obj.geometry->aabb();
-            bool ok = finite(b.min_x)&&finite(b.min_y)&&finite(b.min_z)&&
-                      finite(b.max_x)&&finite(b.max_y)&&finite(b.max_z);
-            if (!ok) { scene_bounded = false; break; }
-            if (!scene_bounded) { scene_box = b; scene_bounded = true; }
-            else {
-                scene_box.min_x = std::min(scene_box.min_x, b.min_x);
-                scene_box.min_y = std::min(scene_box.min_y, b.min_y);
-                scene_box.min_z = std::min(scene_box.min_z, b.min_z);
-                scene_box.max_x = std::max(scene_box.max_x, b.max_x);
-                scene_box.max_y = std::max(scene_box.max_y, b.max_y);
-                scene_box.max_z = std::max(scene_box.max_z, b.max_z);
-            }
-        }
-        if (scene_bounded) {
-            float m = 0.05f * std::max({scene_box.max_x - scene_box.min_x,
-                                        scene_box.max_y - scene_box.min_y,
-                                        scene_box.max_z - scene_box.min_z, 0.1f});
-            scene_box.min_x -= m; scene_box.min_y -= m; scene_box.min_z -= m;
-            scene_box.max_x += m; scene_box.max_y += m; scene_box.max_z += m;
-        }
-    }
-    // FREP_BBOX_CLIP=0 disables the clip for an A/B against the plain march.
-    static const bool clip_env_off = [] {
-        const char* s = std::getenv("FREP_BBOX_CLIP");
-        return s && s[0] == '0';
-    }();
-    const bool use_bbox_clip = scene_bounded && cfg_.bbox_clip && !clip_env_off;
+    const bool scene_bounded = scene_clip_box(scene, scene_box);
+    const bool use_bbox_clip = scene_bounded && cfg_.bbox_clip;
 
     // Optional: shadow and AO. Pass nullptr if they are not needed.
     llvm::Function* shadow_fn = cfg_.enable_shadows ? emit_shadow(sdf_fn) : nullptr;

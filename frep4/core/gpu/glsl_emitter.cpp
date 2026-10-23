@@ -4,6 +4,7 @@
 #include "core/gpu/glsl_interval.hpp"
 #include "core/gpu/glsl_node_interval.hpp"
 #include "core/frep/scene.hpp"
+#include "core/frep/scene_bounds.hpp"
 #include "core/frep/custom_expr.hpp"
 #include "core/frep/mesh_sdf.hpp"
 
@@ -800,31 +801,8 @@ GlslEmitter::emit(const SceneGraph& scene, const TracerConfig& cfg_in,
     // near plane on the other converges to a hit a fraction of epsilon apart,
     // and on a crease that is enough to flip which branch owns the normal.
     // FREP_BBOX_CLIP=0 disables it on both paths for an A/B.
-    bool bbox_bounded = false;
     FRepNode::AABB bbox{};
-    {
-        static const bool clip_env_off = [] {
-            const char* s = std::getenv("FREP_BBOX_CLIP");
-            return s && s[0] == '0';
-        }();
-        auto finite = [](float v) { return std::isfinite(v) && std::fabs(v) < 1e8f; };
-        bool all_finite = true, any = false;
-        for (const auto& [id, obj] : scene.objects()) {
-            if (!obj.visible || !obj.geometry) continue;
-            FRepNode::AABB b = obj.geometry->aabb();
-            if (!(finite(b.min_x) && finite(b.min_y) && finite(b.min_z) &&
-                  finite(b.max_x) && finite(b.max_y) && finite(b.max_z))) { all_finite = false; break; }
-            bbox = any ? FRepNode::AABB::merge(bbox, b) : b;
-            any = true;
-        }
-        if (any && all_finite && cfg.bbox_clip && !clip_env_off) {
-            float m = 0.05f * std::max({bbox.max_x - bbox.min_x, bbox.max_y - bbox.min_y,
-                                        bbox.max_z - bbox.min_z, 0.1f});
-            bbox.min_x -= m; bbox.min_y -= m; bbox.min_z -= m;
-            bbox.max_x += m; bbox.max_y += m; bbox.max_z += m;
-            bbox_bounded = true;
-        }
-    }
+    const bool bbox_bounded = cfg.bbox_clip && scene_clip_box(scene, bbox);
 
     // ── Resolve which tile-cull method to emit ──────────────────────────────
     // Both paths are in the tree; this only selects between them. Interval is

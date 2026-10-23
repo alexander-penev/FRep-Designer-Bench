@@ -3,6 +3,7 @@
 
 #include "core/exec/executor_factory.hpp"
 #include "core/exec/remote_executor.hpp"
+#include "core/compiler/compile_policy.hpp"
 
 #include <QImage>
 #include <QTimer>
@@ -355,6 +356,13 @@ void ExecutorViewport::ensure_executors() {
             executors_[i] = std::make_unique<exec::RemoteExecutor>(rc);
         } else {
             executors_[i] = exec::make_executor(paths_[i], cfg_);
+            // Interactive editing: geometry, material and deformation values
+            // are runtime parameters, so dragging one re-uploads a buffer
+            // instead of recompiling the path (300 ms of GLSL and SPIR-V, a
+            // PTX JIT, an LLVM JIT per edit before this). Topology edits still
+            // recompile, as they must.
+            static const ByParamClassPolicy interactive = ByParamClassPolicy::interactive();
+            if (executors_[i]) executors_[i]->set_compile_policy(&interactive);
         }
     }
     executors_for_paths_ = paths_;

@@ -12,8 +12,11 @@
 #include "core/exec/multipath.hpp"
 #include "core/frep/scene.hpp"
 #include "core/compiler/codegen.hpp"
+#include "core/compiler/compile_policy.hpp"
 #include "core/compiler/jit_engine.hpp"
 #include "core/tracer/tile_scheduler.hpp"
+
+#include <llvm/Support/raw_ostream.h>
 
 #include <chrono>
 #include <cstdint>
@@ -42,6 +45,13 @@ public:
     PathKind path() const override { return PathKind::CpuIr; }
     bool available() const override { return true; }  // CPU always available
 
+    // Runtime parameters (see IExecutor::set_compile_policy): the placed
+    // parameters are read from the kernel's buffer, so a value edit skips the
+    // JIT. Not owned.
+    void set_compile_policy(const CompilePolicy* p) override {
+        policy_ = p; cached_fn_ = nullptr; cached_ir_.clear();
+    }
+
     TileResult render(const SceneGraph& scene, int W, int H,
                       const Tile& tile) override {
         using clk = std::chrono::steady_clock;
@@ -59,10 +69,18 @@ public:
         // structure alone served a stale image after a parameter edit.
         auto t_c = clk::now();
         const std::size_t shash = scene.content_hash();
-        if (!cached_fn_ || shash != cached_structure_hash_) {
+        // With a compile policy installed (set_compile_policy) the runtime-
+        // placed parameters are buffer loads, so their values are not in the
+        // IR: codegen runs to refresh the bindings and the IR text is compared
+        // to decide whether the JIT has to run — a value edit then costs the
+        // codegen and a buffer refresh, not the compile.
+        const bool reuse = cached_fn_ && shash == cached_structure_hash_ && !policy_;
+        if (!reuse) {
             auto ctx = std::make_unique<llvm::LLVMContext>();
             TracerConfig cfg = cfg_;
+            cfg.incremental_params = (policy_ != nullptr);
             SceneCodegen cg(*ctx, cfg);
+            cg.set_compile_policy(policy_);
             try {
                 if (std::getenv("FREP4_VEC_RENDER"))
                     cg.emit_render_tile_vec(scene, mode_, 8);   // Approach B (CPU packet)
@@ -73,13 +91,20 @@ public:
                 return r;
             }
             auto mod = cg.take_module();
-            // One engine for the executor's lifetime; load() replaces the
-            // previous module, so a recompile neither leaks the old code nor
-            // pays for a new JIT.
-            if (!jit_) jit_ = std::make_unique<JitEngine>();
-            auto fn_or = jit_->load(std::move(mod), std::move(ctx));
-            if (!fn_or) { r.error = "jit: " + fn_or.error(); return r; }
-            cached_fn_ = *fn_or;
+            std::string ir_text;
+            if (policy_) { llvm::raw_string_ostream os(ir_text); mod->print(os, nullptr); }
+            if (!cached_fn_ || !policy_ || ir_text != cached_ir_) {
+                // One engine for the executor's lifetime; load() replaces the
+                // previous module, so a recompile neither leaks the old code
+                // nor pays for a new JIT.
+                if (!jit_) jit_ = std::make_unique<JitEngine>();
+                auto fn_or = jit_->load(std::move(mod), std::move(ctx));
+                if (!fn_or) { r.error = "jit: " + fn_or.error(); return r; }
+                cached_fn_ = *fn_or;
+                cached_ir_ = std::move(ir_text);
+            }
+            cached_params_.assign(static_cast<std::size_t>(cg.param_slot_count()), 0.0f);
+            for (const auto& bnd : cg.param_bindings()) cached_params_[bnd.slot] = bnd.default_value;
             cached_structure_hash_ = shash;
             r.compile_ms = std::chrono::duration<double, std::milli>(clk::now() - t_c).count();
         } else {
@@ -125,7 +150,8 @@ public:
         r.threads_used = rp.num_threads > 0
             ? rp.num_threads : (int)std::thread::hardware_concurrency();
         auto t_r = clk::now();
-        TileScheduler::render(*fn, target, scene.camera(), rp);
+        TileScheduler::render(*fn, target, scene.camera(), rp,
+                              cached_params_.empty() ? nullptr : cached_params_.data());
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
 
         if (!whole) {
@@ -172,6 +198,9 @@ private:
     std::unique_ptr<JitEngine> jit_;
     RenderTileFn               cached_fn_ = nullptr;
     std::size_t                cached_structure_hash_ = 0;
+    const CompilePolicy*       policy_ = nullptr;
+    std::string                cached_ir_;       // IR text the JIT'd code came from (policy mode)
+    std::vector<float>         cached_params_;   // kernel params in slot order, from that codegen
     // Full-frame buffer for sub-frame tiles (see render()).
     std::unique_ptr<float[]>   full_;
     std::size_t                full_size_ = 0;

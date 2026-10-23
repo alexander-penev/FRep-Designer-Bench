@@ -162,6 +162,9 @@ int main(int argc, char** argv) {
             cfg.enable_specular = false;
         }
         cfg.output_format = out_fmt;
+        // FREP_CULL_SLABS=<n> turns the per-tile cull on with n depth slabs
+        // (0 = off, the TracerConfig default), for an A/B across the paths.
+        if (const char* s = std::getenv("FREP_CULL_SLABS")) cfg.cull_slabs = std::atoi(s);
         auto exec = make_executor(pk, cfg);
         if (!exec || !exec->available()) {
             std::printf("%-9s | %10s\n", name, "unavailable");

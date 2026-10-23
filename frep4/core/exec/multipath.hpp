@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+namespace frep { class CompilePolicy; }   // core/compiler/compile_policy.hpp
+
 namespace frep::exec {
 
 // A rectangular region of the output image: pixels [x0,x1) × [y0,y1).
@@ -139,6 +141,13 @@ public:
     // the correct rays for a sub-region. Returns pixels for the tile only.
     virtual TileResult render(const SceneGraph& scene, int W, int H,
                               const Tile& tile) = 0;
+
+    // Install a compile policy (core/compiler/compile_policy.hpp): parameters
+    // the policy places at runtime become buffer loads, so editing their
+    // values re-uploads a buffer instead of recompiling the path. Not owned;
+    // null restores the all-baked default. Paths that have no runtime
+    // parameter mechanism ignore it.
+    virtual void set_compile_policy(const CompilePolicy* policy) { (void)policy; }
 };
 
 // ── Strategies (abstract base classes) ──────────────────────────────────────

@@ -49,7 +49,7 @@ public:
     // every parameter baked, the previous behaviour). When set, runtime-placed
     // parameters are read from the shader's binding-3 buffer, so editing them
     // re-uploads the buffer instead of recompiling the SPIR-V. Not owned.
-    void set_compile_policy(const CompilePolicy* p) { policy_ = p; have_key_ = false; }
+    void set_compile_policy(const CompilePolicy* p) override { policy_ = p; have_key_ = false; }
 
     PathKind path() const override { return PathKind::GpuGlsl; }
     bool available() const override { return gpu::VulkanCtx::available(); }
@@ -102,7 +102,9 @@ public:
         // it equal — and in tiled layouts that was paid once per tile. Runtime
         // parameter values are not in the source (that is what the binding
         // table is for), so the pbuf refresh below still runs every frame.
-        const std::size_t key = scene.content_hash();
+        // Lights travel in the push constants, not in the source, so a light
+        // edit must not look like a scene change here.
+        const std::size_t key = scene.content_hash(/*with_lights=*/false);
         const bool reuse = ctx_ && have_key_ && key == cached_key_;
         if (!reuse) {
             auto emit = gpu::GlslEmitter::emit(scene, cfg, btp);
