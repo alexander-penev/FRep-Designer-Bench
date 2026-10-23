@@ -1030,15 +1030,17 @@ GlslEmitter::emit(const SceneGraph& scene, const TracerConfig& cfg_in,
                     break;
                 }
                 case Material::Pattern::Noise: {
-                    // Same Murmur-like integer hash as the CPU IR path:
-                    //   h = ix*K1 ^ iy*K2 ^ iz*K3, mix, mask, scale to [0,1)
+                    // The CPU IR path's hash, through frep_hash3 (emitted next
+                    // to scene_sdf): h = ix*K1 ^ iy*K2 ^ iz*K3; h ^= h >> 16;
+                    // h &= 0x7FFFFF; scale to [0,1). The inline GLSL this
+                    // replaces skipped the h ^= h >> 16 mix and so disagreed
+                    // with the CPU on every noise pixel.
                     alb_expr
                         << "mix(" << vc3(M.albedo) << ", " << vc3(M.albedo2)
-                        << ", float(("
-                        << "(int(floor(" << flit(M.pattern_scale) << " * x)) * 0x9E3779B9) ^ "
-                        << "(int(floor(" << flit(M.pattern_scale) << " * y)) * 0x85EBCA6B) ^ "
-                        << "(int(floor(" << flit(M.pattern_scale) << " * z)) * 0xC2B2AE35)"
-                        << ") & 0x7FFFFF) * "
+                        << ", float(frep_hash3("
+                        << "int(floor(" << flit(M.pattern_scale) << " * x)), "
+                        << "int(floor(" << flit(M.pattern_scale) << " * y)), "
+                        << "int(floor(" << flit(M.pattern_scale) << " * z)))) * "
                         << flit(1.0f / 8388608.0f) << ")";
                     break;
                 }
@@ -1320,7 +1322,15 @@ GlslEmitter::emit(const SceneGraph& scene, const TracerConfig& cfg_in,
         << sdf_body.str()
         << "}\n"
         << "\n"
-        << "float scene_sdf_v(vec3 p) { return scene_sdf(p.x, p.y, p.z); }\n";
+        << "float scene_sdf_v(vec3 p) { return scene_sdf(p.x, p.y, p.z); }\n"
+        // The integer hash the CPU IR path uses for the Noise pattern (see
+        // codegen.cpp). Unsigned, so `>>` is the logical shift the IR's lshr
+        // is; after scene_sdf, so the RT shaders' lifted region contains it.
+        << "uint frep_hash3(int ix, int iy, int iz) {\n"
+        << "    uint h = uint(ix) * 0x9E3779B9u ^ uint(iy) * 0x85EBCA6Bu ^ uint(iz) * 0xC2B2AE35u;\n"
+        << "    h ^= h >> 16u;\n"
+        << "    return h & 0x7FFFFFu;\n"
+        << "}\n";
     if (use_interval_cull) {
         // Interval SDF for the tile cull: vec2(lo,hi) bound of the field over a
         // box. A single CustomExpr uses the expression interval emitter directly;
