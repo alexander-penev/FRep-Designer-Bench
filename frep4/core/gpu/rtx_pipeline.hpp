@@ -136,6 +136,7 @@ struct RtxPipelineCache {
     void*         frame_image_view = nullptr;  // VkImageView
     void*         frame_readback = nullptr;    // VkBuffer
     void*         frame_readback_mem = nullptr;// VkDeviceMemory
+    void*         frame_readback_mapped = nullptr; // persistent host map of it
     int           frame_w = 0, frame_h = 0;    // extent the above were built for
 
     // Per-frame Vulkan objects that do not actually change between frames: the

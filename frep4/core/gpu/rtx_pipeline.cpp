@@ -98,6 +98,7 @@ struct FrameRT {
     VkImageView    view         = VK_NULL_HANDLE;
     VkBuffer       readback     = VK_NULL_HANDLE;
     VkDeviceMemory readback_mem = VK_NULL_HANDLE;
+    void*          mapped       = nullptr;   // persistent map when cached
     bool           cached       = false;
 };
 
@@ -113,6 +114,7 @@ acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
         f.view         = (VkImageView)cache->frame_image_view;
         f.readback     = (VkBuffer)cache->frame_readback;
         f.readback_mem = (VkDeviceMemory)cache->frame_readback_mem;
+        f.mapped       = cache->frame_readback_mapped;
         f.cached       = true;
         return f;
     }
@@ -121,10 +123,11 @@ acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
         if (cache->frame_image_view) vkDestroyImageView(dev, (VkImageView)cache->frame_image_view, nullptr);
         vkDestroyImage(dev, (VkImage)cache->frame_image, nullptr);
         vkFreeMemory(dev, (VkDeviceMemory)cache->frame_image_mem, nullptr);
+        if (cache->frame_readback_mapped) vkUnmapMemory(dev, (VkDeviceMemory)cache->frame_readback_mem);
         vkDestroyBuffer(dev, (VkBuffer)cache->frame_readback, nullptr);
         vkFreeMemory(dev, (VkDeviceMemory)cache->frame_readback_mem, nullptr);
         cache->frame_image = cache->frame_image_mem = cache->frame_image_view = nullptr;
-        cache->frame_readback = cache->frame_readback_mem = nullptr;
+        cache->frame_readback = cache->frame_readback_mem = cache->frame_readback_mapped = nullptr;
     }
 
     FrameRT f;
@@ -158,14 +161,20 @@ acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
     ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vkCreateImageView(dev, &ivci, nullptr, &f.view);
 
-    auto rb = mk_readback_buf(ctx, (VkDeviceSize)width * height * 4 * sizeof(float));
+    // Sized for the rgba8 image it receives; it was sized for rgba32f long
+    // after the image stopped being one, four times what is copied into it.
+    auto rb = mk_readback_buf(ctx, (VkDeviceSize)width * height * 4);
     if (!rb) return std::unexpected(rb.error());
     f.readback = rb->buf; f.readback_mem = rb->mem;
 
     if (cache && cacheable) {
+        // Map once and keep it: the buffer is read on every frame and the
+        // memory type is host-coherent, so the per-frame map/unmap only cost.
+        vkMapMemory(dev, f.readback_mem, 0, VK_WHOLE_SIZE, 0, &f.mapped);
         cache->frame_image = f.image; cache->frame_image_mem = f.image_mem;
         cache->frame_image_view = f.view; cache->frame_readback = f.readback;
         cache->frame_readback_mem = f.readback_mem;
+        cache->frame_readback_mapped = f.mapped;
         cache->frame_w = width; cache->frame_h = height;
         f.cached = true;   // stored in cache → don't tear down per frame
     }
@@ -286,6 +295,7 @@ void RtxPipelineCache::release(const RtxCtx& ctx) {
     if (frame_image_view) vkDestroyImageView(dev, (VkImageView)frame_image_view, nullptr);
     if (frame_image)      vkDestroyImage(dev, (VkImage)frame_image, nullptr);
     if (frame_image_mem)  vkFreeMemory(dev, (VkDeviceMemory)frame_image_mem, nullptr);
+    if (frame_readback_mapped) vkUnmapMemory(dev, (VkDeviceMemory)frame_readback_mem);
     if (frame_readback)   vkDestroyBuffer(dev, (VkBuffer)frame_readback, nullptr);
     if (frame_readback_mem) vkFreeMemory(dev, (VkDeviceMemory)frame_readback_mem, nullptr);
     if (frame_fence)     vkDestroyFence(dev, (VkFence)frame_fence, nullptr);
@@ -294,7 +304,7 @@ void RtxPipelineCache::release(const RtxCtx& ctx) {
     frame_fence = frame_cmd_pool = frame_cmd_buf = nullptr;
     frame_desc_pool = frame_desc_set = nullptr; frame_tlas = nullptr;
     frame_image = frame_image_mem = frame_image_view = nullptr;
-    frame_readback = frame_readback_mem = nullptr;
+    frame_readback = frame_readback_mem = frame_readback_mapped = nullptr;
     frame_w = frame_h = 0;
     pipeline = pipeline_layout = descriptor_layout = nullptr;
     sbt_buffer = sbt_memory = nullptr;
@@ -742,10 +752,13 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     out.rgba.resize((std::size_t)width * height * 4);
     auto t_rb0 = clk::now();
     {
-        void* p = nullptr;
-        vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
+        // Cached frames keep their readback buffer mapped; the per-frame
+        // (texture/mesh) path still maps and unmaps its own.
+        void* p = frt->mapped;
+        const bool transient = (p == nullptr);
+        if (transient) vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
         unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
-        vkUnmapMemory(dev, rb_mem);
+        if (transient) vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();
     // pipeline = entry → just before submit; trace = submit→fence; readback = map.
@@ -1201,10 +1214,13 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     out.rgba.resize((std::size_t)width * height * 4);
     auto t_rb0 = clk::now();
     {
-        void* p = nullptr;
-        vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
+        // Cached frames keep their readback buffer mapped; the per-frame
+        // (texture/mesh) path still maps and unmaps its own.
+        void* p = frt->mapped;
+        const bool transient = (p == nullptr);
+        if (transient) vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
         unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
-        vkUnmapMemory(dev, rb_mem);
+        if (transient) vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();
     out.pipeline_ms = msf(t_pipe0, t_trace0);

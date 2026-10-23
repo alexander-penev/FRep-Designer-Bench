@@ -37,6 +37,7 @@
 // to ensure correct teardown order; see the `Impl` struct.
 
 #include "core/gpu/vulkan_ctx.hpp"
+#include "core/gpu/gpu_numa.hpp"
 #include "core/gpu/rgba_unpack.hpp"
 #include "core/gpu/vk_fence_wait.hpp"
 
@@ -121,6 +122,10 @@ struct VulkanCtx::Impl {
     VkBuffer       staging    = VK_NULL_HANDLE;
     VkDeviceMemory staging_mem = VK_NULL_HANDLE;
     VkDeviceSize   staging_sz  = 0;
+    // Mapped once when allocated and left mapped: the frame is read out of
+    // it on every render, and the memory type is host-coherent, so there is
+    // nothing a map/unmap pair per frame did except cost two driver calls.
+    void*          staging_mapped = nullptr;
 
     // Optional mesh storage buffer (binding = 1). Allocated once at
     // create() time when the caller provides mesh voxel data.
@@ -156,6 +161,7 @@ struct VulkanCtx::Impl {
             if (param_buffer)     vkDestroyBuffer(device, param_buffer, nullptr);
             if (param_buffer_mem) vkFreeMemory(device, param_buffer_mem, nullptr);
             if (mesh_buffer)     vkDestroyBuffer(device, mesh_buffer, nullptr);
+            if (staging_mapped) vkUnmapMemory(device, staging_mem);
             if (staging_mem)  vkFreeMemory(device, staging_mem, nullptr);
             if (staging)      vkDestroyBuffer(device, staging, nullptr);
             if (image_view)   vkDestroyImageView(device, image_view, nullptr);
@@ -227,6 +233,7 @@ struct VulkanCtx::Impl {
 
         // Staging buffer (host visible, transfer dst).
         VkDeviceSize sz = static_cast<VkDeviceSize>(w) * h * 4;
+        if (staging_mapped) { vkUnmapMemory(device, staging_mem); staging_mapped = nullptr; }
         if (staging_mem) { vkFreeMemory(device, staging_mem, nullptr); staging_mem = VK_NULL_HANDLE; }
         if (staging)     { vkDestroyBuffer(device, staging, nullptr); staging = VK_NULL_HANDLE; }
         staging_sz = sz;
@@ -258,6 +265,7 @@ struct VulkanCtx::Impl {
         bmai.memoryTypeIndex = static_cast<std::uint32_t>(btype);
         VK_TRY(vkAllocateMemory(device, &bmai, nullptr, &staging_mem));
         VK_TRY(vkBindBufferMemory(device, staging, staging_mem, 0));
+        VK_TRY(vkMapMemory(device, staging_mem, 0, staging_sz, 0, &staging_mapped));
 
         return true;
     }
@@ -357,6 +365,10 @@ VulkanCtx::create(const std::string& spv_path,
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(I.physical_device, &props);
         I.device_name = props.deviceName;
+        // Stay on the socket the card hangs off: the thread that submits and
+        // reads frames back, and the host memory the driver allocates for it
+        // from here on, both land on the card's NUMA node (see gpu_numa.hpp).
+        bind_thread_to_pci_device(vk_pci_bdf(I.physical_device));
     }
 
     // 3. Logical device + compute queue.
@@ -778,10 +790,7 @@ VulkanCtx::render_impl(const ShaderPush& push, Sink&& sink)
     // the caller's buffer is tile-sized (tw*th*4) — equal to the full frame
     // when no tile was requested.
     std::size_t expected_size = static_cast<std::size_t>(tw) * th * 4;
-    void* mapped = nullptr;
-    VK_TRY(vkMapMemory(I.device, I.staging_mem, 0, I.staging_sz, 0, &mapped));
-    sink(static_cast<const std::uint8_t*>(mapped), expected_size);
-    vkUnmapMemory(I.device, I.staging_mem);
+    sink(static_cast<const std::uint8_t*>(I.staging_mapped), expected_size);
 
     auto t1 = std::chrono::steady_clock::now();
     using ms = std::chrono::duration<double, std::milli>;

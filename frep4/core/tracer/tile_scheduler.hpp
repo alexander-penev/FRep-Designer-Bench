@@ -7,6 +7,7 @@
 
 #include "core/compiler/jit_engine.hpp"
 #include "core/frep/scene.hpp"
+#include "core/tracer/cpu_affinity.hpp"
 
 #include <algorithm>
 #include <array>
@@ -245,6 +246,9 @@ private:
 
     private:
         void worker_main(int idx) {
+            // Whoever created the pool may be pinned to the GPU's socket;
+            // the CPU path wants every core it was launched with.
+            reset_thread_affinity_to_launch();
             std::uint64_t seen = 0;
             while (true) {
                 const std::function<void()>* job = nullptr;

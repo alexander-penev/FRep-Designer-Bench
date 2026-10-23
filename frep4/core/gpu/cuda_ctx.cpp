@@ -1,8 +1,10 @@
 // core/gpu/cuda_ctx.cpp
 
 #include "core/gpu/cuda_ctx.hpp"
+#include "core/gpu/gpu_numa.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 
@@ -50,6 +52,7 @@ CUresult cuInit(unsigned int Flags);
 CUresult cuDeviceGetCount(int* count);
 CUresult cuDeviceGet(CUdevice* device, int ordinal);
 CUresult cuDeviceGetName(char* name, int len, CUdevice dev);
+CUresult cuDeviceGetPCIBusId(char* pciBusId, int len, CUdevice dev);
 CUresult cuCtxCreate_v2(CUcontext* pctx, unsigned int flags, CUdevice dev);
 CUresult cuCtxDestroy_v2(CUcontext ctx);
 CUresult cuCtxSetCurrent(CUcontext ctx);
@@ -135,6 +138,19 @@ CudaCtx::create(const std::string& ptx, const std::string& kernel_name) {
     char name[256] = {0};
     cuDeviceGetName(name, sizeof(name), dev);
     self->stats_.device_name = name;
+
+    // Pin this thread — the one that will launch and read back — to the
+    // card's NUMA node before the context and its host allocations exist
+    // (see gpu_numa.hpp). CUDA spells the address in upper-case hex; sysfs
+    // wants lower case.
+    {
+        char bdf[32] = {0};
+        if (cuDeviceGetPCIBusId(bdf, sizeof(bdf), dev) == CUDA_SUCCESS) {
+            std::string s(bdf);
+            for (auto& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            bind_thread_to_pci_device(s);
+        }
+    }
 
     e = cuCtxCreate_v2(&I.context, 0, dev);
     if (e != CUDA_SUCCESS) return std::unexpected("cuCtxCreate: " + cu_err(e));

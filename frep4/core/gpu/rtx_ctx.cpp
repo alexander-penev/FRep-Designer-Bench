@@ -1,6 +1,7 @@
 // core/gpu/rtx_ctx.cpp — see rtx_ctx.hpp. RT device + entry points.
 
 #include "core/gpu/rtx_ctx.hpp"
+#include "core/gpu/gpu_numa.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -117,6 +118,10 @@ std::expected<RtxCtx, std::string> RtxCtx::create() {
         vkGetPhysicalDeviceProperties(chosen, &props);
         ctx.device_name_ = props.deviceName;
     }
+    // Keep the submitting thread and its host allocations on the card's
+    // socket (see gpu_numa.hpp); a software device has no PCI address and
+    // the call is then a no-op.
+    if (!chosen_is_cpu) bind_thread_to_pci_device(vk_pci_bdf(chosen));
 
     // Queue family: first with compute (RT dispatch runs on compute/graphics).
     std::uint32_t qn = 0;

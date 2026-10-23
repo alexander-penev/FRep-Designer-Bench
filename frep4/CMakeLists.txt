@@ -127,6 +127,7 @@ target_include_directories(frep_opts INTERFACE
 # ═════════════════════════════════════════════════════════════════════════════
 add_library(frep_core STATIC
     core/compiler/codegen.cpp
+    core/tracer/cpu_affinity.cpp
     core/frep/custom_expr.cpp
     core/frep/expr_ast.cpp
     core/frep/template_fn.cpp
@@ -283,6 +284,7 @@ if(FREP_BUILD_GPU)
     # Add Vulkan host code to the core library.
     target_sources(frep_core PRIVATE
         core/gpu/vulkan_ctx.cpp
+        core/gpu/gpu_numa.cpp
         core/gpu/glsl_emitter.cpp
         core/gpu/rtx_caps.cpp
         core/gpu/rtx_ctx.cpp
