@@ -4,9 +4,12 @@
 #include "core/gpu/glsl_interval.hpp"
 #include "core/gpu/glsl_node_interval.hpp"
 #include "core/frep/scene.hpp"
+#include "core/frep/custom_expr.hpp"
 #include "core/frep/mesh_sdf.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <functional>
 
@@ -732,10 +735,25 @@ GlslEmitter::emit_node_dual(Ctx& c, const FRepNode& n,
             }
             return emit_node_dual(c, *target, x, y, z);   // delegate to target
         }
+        case K::Plugin: {
+            // A CustomExpr differentiates its own expression (the d_* helpers
+            // for every builtin are in the preamble); a template call inside
+            // it, or any other plugin node, still falls back to finite
+            // differences for this object.
+            {
+                std::ostringstream e;
+                if (n.emit_glsl_dual(e, x, y, z)) {
+                    auto v = c.fresh_d();
+                    g << "    Dual " << v << " = " << e.str() << ";\n";
+                    return v;
+                }
+            }
+            return std::unexpected(
+                std::string("no dual AD for node type: ") + n.type_name());
+        }
         default:
-            // BendXY and plugin/mesh/custom nodes: no dual emitter yet.
-            // Signal the caller to fall back to finite-difference normals
-            // for this object.
+            // BendXY and mesh nodes: no dual emitter yet. Signal the caller
+            // to fall back to finite-difference normals for this object.
             return std::unexpected(
                 std::string("no dual AD for node type: ") + n.type_name());
     }
@@ -771,6 +789,41 @@ GlslEmitter::emit(const SceneGraph& scene, const TracerConfig& cfg_in,
         }
         if (visible <= 1 && !needs_safety)
             cfg.safety_factor = 1.0f;
+    }
+
+    // ── Scene bounds for the ray-box clip ───────────────────────────────────
+    // The same box the IR path clips its march to (SceneCodegen): the union of
+    // the visible objects' AABBs, widened by 5% of its largest side, and only
+    // when every box is finite (AABB::infinite() is ±1e9, which counts as
+    // unbounded). Mirroring the clip here keeps the two paths' march sequences
+    // the same — a ray that starts at the box face on one path and at the
+    // near plane on the other converges to a hit a fraction of epsilon apart,
+    // and on a crease that is enough to flip which branch owns the normal.
+    // FREP_BBOX_CLIP=0 disables it on both paths for an A/B.
+    bool bbox_bounded = false;
+    FRepNode::AABB bbox{};
+    {
+        static const bool clip_env_off = [] {
+            const char* s = std::getenv("FREP_BBOX_CLIP");
+            return s && s[0] == '0';
+        }();
+        auto finite = [](float v) { return std::isfinite(v) && std::fabs(v) < 1e8f; };
+        bool all_finite = true, any = false;
+        for (const auto& [id, obj] : scene.objects()) {
+            if (!obj.visible || !obj.geometry) continue;
+            FRepNode::AABB b = obj.geometry->aabb();
+            if (!(finite(b.min_x) && finite(b.min_y) && finite(b.min_z) &&
+                  finite(b.max_x) && finite(b.max_y) && finite(b.max_z))) { all_finite = false; break; }
+            bbox = any ? FRepNode::AABB::merge(bbox, b) : b;
+            any = true;
+        }
+        if (any && all_finite && cfg.bbox_clip && !clip_env_off) {
+            float m = 0.05f * std::max({bbox.max_x - bbox.min_x, bbox.max_y - bbox.min_y,
+                                        bbox.max_z - bbox.min_z, 0.1f});
+            bbox.min_x -= m; bbox.min_y -= m; bbox.min_z -= m;
+            bbox.max_x += m; bbox.max_y += m; bbox.max_z += m;
+            bbox_bounded = true;
+        }
     }
 
     // ── Resolve which tile-cull method to emit ──────────────────────────────
@@ -1389,6 +1442,27 @@ GlslEmitter::emit(const SceneGraph& scene, const TracerConfig& cfg_in,
             << "Dual d_sqrt(Dual a){ float s=sqrt(max(a.v,1e-12)); return Dual(s, a.g*(0.5/s)); }\n"
             << "Dual d_sin(Dual a){ return Dual(sin(a.v), cos(a.v)*a.g); }\n"
             << "Dual d_cos(Dual a){ return Dual(cos(a.v), -sin(a.v)*a.g); }\n"
+            // The rest of the CustomExpr builtins (expr_ast.hpp), so a
+            // user-written field has an analytic normal like a built-in one.
+            << "Dual d_const(float v){ return Dual(v, vec3(0.0)); }\n"
+            << "Dual d_tan(Dual a){ float t=tan(a.v); return Dual(t, (1.0+t*t)*a.g); }\n"
+            << "Dual d_abs(Dual a){ return Dual(abs(a.v), sign(a.v)*a.g); }\n"
+            << "Dual d_exp(Dual a){ float e=exp(a.v); return Dual(e, e*a.g); }\n"
+            << "Dual d_log(Dual a){ return Dual(log(a.v), a.g/a.v); }\n"
+            << "Dual d_floor(Dual a){ return Dual(floor(a.v), vec3(0.0)); }\n"
+            << "Dual d_ceil(Dual a){ return Dual(ceil(a.v), vec3(0.0)); }\n"
+            << "Dual d_atan(Dual a){ return Dual(atan(a.v), a.g/(1.0+a.v*a.v)); }\n"
+            << "Dual d_asin(Dual a){ return Dual(asin(a.v), a.g/sqrt(max(1.0-a.v*a.v, 1e-12))); }\n"
+            << "Dual d_acos(Dual a){ return Dual(acos(a.v), -a.g/sqrt(max(1.0-a.v*a.v, 1e-12))); }\n"
+            << "Dual d_pow(Dual a, Dual e){\n"
+            << "    float p = pow(a.v, e.v);\n"
+            << "    vec3 g = e.v*pow(a.v, e.v-1.0)*a.g;\n"
+            << "    if (a.v > 0.0) g += p*log(a.v)*e.g;\n"
+            << "    return Dual(p, g);\n"
+            << "}\n"
+            << "Dual d_nth_root(Dual a, Dual n){ return d_pow(a, d_div(Dual(1.0, vec3(0.0)), n)); }\n"
+            << "Dual d_atan2(Dual y, Dual x){ float d=x.v*x.v+y.v*y.v; return Dual(atan(y.v, x.v), (x.v*y.g - y.v*x.g)/max(d, 1e-12)); }\n"
+            << "Dual d_mod(Dual a, Dual b){ return Dual(mod(a.v, b.v), a.g - b.g*floor(a.v/b.v)); }\n"
             // min/max: pick the branch's value AND gradient (subgradient).
             << "Dual d_min(Dual a, Dual b){ return (a.v < b.v) ? a : b; }\n"
             << "Dual d_max(Dual a, Dual b){ return (a.v > b.v) ? a : b; }\n"
@@ -1916,6 +1990,23 @@ GlslEmitter::emit(const SceneGraph& scene, const TracerConfig& cfg_in,
             << "    t = max(t, sh_cull_t0);\n";
     } else {
         src << "    float t_far = " << flit(cfg.max_dist) << ";\n";
+    }
+    if (bbox_bounded) {
+        // Ray-box clip, the slab method exactly as the IR path emits it: the
+        // march starts no earlier than the box entry and stops no later than
+        // the exit; a ray that misses the box has t_far < t and the loop's
+        // first test ends it (an instant miss).
+        src << "    {\n"
+            << "        vec3 inv = 1.0 / ray_dir;\n"
+            << "        vec3 t1 = (vec3(" << flit(bbox.min_x) << ", " << flit(bbox.min_y) << ", "
+            << flit(bbox.min_z) << ") - ray_origin) * inv;\n"
+            << "        vec3 t2 = (vec3(" << flit(bbox.max_x) << ", " << flit(bbox.max_y) << ", "
+            << flit(bbox.max_z) << ") - ray_origin) * inv;\n"
+            << "        vec3 tmn = min(t1, t2);\n"
+            << "        vec3 tmx = max(t1, t2);\n"
+            << "        t     = max(t, max(max(tmn.x, tmn.y), tmn.z));\n"
+            << "        t_far = min(t_far, min(min(tmx.x, tmx.y), tmx.z));\n"
+            << "    }\n";
     }
     src
         << "    // Tracer parameters baked from TracerConfig: max_steps,\n"

@@ -12,10 +12,16 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <functional>
 #include <numbers>
+#include <optional>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace frep {
 
@@ -953,6 +959,450 @@ llvm::Value* CustomExprNode::codegen(CgCtx& c, llvm::Value* x,
         }
     }
     return c.b.CreateCall(fn, {x, y, z}, "expr_v");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CustomExprNode::codegen_grad — forward-mode AD in LLVM IR over the AST.
+//
+// One pass over the expression yields the value and the directional derivative
+// along the seed (x.dot, y.dot, z.dot); the tracer seeds the three axes, so a
+// normal is three passes instead of the finite-difference default's six full
+// field evaluations (plus the value). Every builtin of expr_ast.hpp has a rule;
+// a user template, or a libm function in the SIMD path (no vector form), makes
+// the whole node fall back to the default so correctness never depends on
+// coverage. Values follow the scalar emitter (raw IEEE pow, minnum-style
+// min/max as a select); only the derivative is new.
+// ═════════════════════════════════════════════════════════════════════════════
+FRepNode::DualVal CustomExprNode::codegen_grad(CgCtx& c, DualVal x, DualVal y,
+                                               DualVal z) const {
+    ensure_parsed();
+    // FREP_CUSTOMEXPR_FD=1 keeps the finite-difference default, for an A/B of
+    // the analytic gradient against it (speed and parity).
+    static const bool force_fd = [] {
+        const char* s = std::getenv("FREP_CUSTOMEXPR_FD");
+        return s && s[0] == '1';
+    }();
+    if (force_fd) return FRepNode::codegen_grad(c, x, y, z);
+    auto& b = c.b;
+    llvm::Type* ty = x.val->getType();               // float or <W x float>
+    auto cst = [&](double v) -> llvm::Value* { return llvm::ConstantFP::get(ty, v); };
+    using Kind = expr::Node::Kind;
+    bool ok = true;
+    std::unordered_map<const expr::Node*, DualVal> memo;
+
+    std::function<bool(const expr::Node&)> varies = [&](const expr::Node& n) -> bool {
+        if (n.kind == Kind::Var) return true;
+        for (const auto& ch : n.children) if (varies(*ch)) return true;
+        return false;
+    };
+    auto un = [&](llvm::Intrinsic::ID id, llvm::Value* v) {
+        return frep::llvm_compat::unary_intrinsic(b, id, v);
+    };
+    auto libm1 = [&](const char* fn, llvm::Value* a) -> llvm::Value* {
+        auto* fty = llvm::FunctionType::get(b.getFloatTy(), {b.getFloatTy()}, false);
+        return b.CreateCall(c.mod.getOrInsertFunction(fn, fty), {a});
+    };
+    auto libm2 = [&](const char* fn, llvm::Value* a0, llvm::Value* a1) -> llvm::Value* {
+        auto* fty = llvm::FunctionType::get(b.getFloatTy(), {b.getFloatTy(), b.getFloatTy()}, false);
+        return b.CreateCall(c.mod.getOrInsertFunction(fn, fty), {a0, a1});
+    };
+
+    std::function<DualVal(const expr::Node&)> gen = [&](const expr::Node& n) -> DualVal {
+        DualVal r{cst(0.0), cst(0.0)};
+        if (!ok) return r;
+        if (auto it = memo.find(&n); it != memo.end()) return it->second;
+        switch (n.kind) {
+            case Kind::Number: r = {cst(n.num), cst(0.0)}; break;
+            case Kind::Var:
+                if      (n.ident == "x") r = x;
+                else if (n.ident == "y") r = y;
+                else if (n.ident == "z") r = z;
+                else ok = false;                      // a template's parameter
+                break;
+            case Kind::Const:
+                r = {cst(n.ident == "pi" ? std::numbers::pi
+                       : n.ident == "e"  ? std::numbers::e : 0.0), cst(0.0)};
+                break;
+            case Kind::UnaryNeg: {
+                auto a = gen(*n.children[0]);
+                r = {b.CreateFNeg(a.val), b.CreateFNeg(a.dot)};
+                break;
+            }
+            case Kind::BinOp: {
+                auto l = gen(*n.children[0]);
+                auto rr = gen(*n.children[1]);
+                switch (n.bop) {
+                    case expr::Op::Add:
+                        r = {b.CreateFAdd(l.val, rr.val), b.CreateFAdd(l.dot, rr.dot)}; break;
+                    case expr::Op::Sub:
+                        r = {b.CreateFSub(l.val, rr.val), b.CreateFSub(l.dot, rr.dot)}; break;
+                    case expr::Op::Mul:
+                        r = {b.CreateFMul(l.val, rr.val),
+                             b.CreateFAdd(b.CreateFMul(l.val, rr.dot), b.CreateFMul(rr.val, l.dot))};
+                        break;
+                    case expr::Op::Div: {
+                        auto* q = b.CreateFDiv(l.val, rr.val);
+                        // (l' - q r') / r
+                        r = {q, b.CreateFDiv(b.CreateFSub(l.dot, b.CreateFMul(q, rr.dot)), rr.val)};
+                        break;
+                    }
+                }
+                break;
+            }
+            case Kind::Call: {
+                const auto& nm = n.ident;
+                if (reg_ && reg_->find(nm)) { ok = false; break; }
+                std::vector<DualVal> a;
+                for (const auto& ch : n.children) a.push_back(gen(*ch));
+                if (!ok || a.empty()) { ok = false; break; }
+                const auto& a0 = a[0];
+                if (nm == "sqrt") {
+                    auto* s  = un(llvm::Intrinsic::sqrt, a0.val);
+                    auto* sg = un(llvm::Intrinsic::sqrt,
+                                  frep::llvm_compat::max_num(b, a0.val, cst(1e-12)));
+                    r = {s, b.CreateFDiv(b.CreateFMul(a0.dot, cst(0.5)), sg)};
+                } else if (nm == "abs") {
+                    auto* neg = b.CreateFCmpOLT(a0.val, cst(0.0));
+                    auto* sgn = b.CreateSelect(neg, cst(-1.0), cst(1.0));
+                    r = {un(llvm::Intrinsic::fabs, a0.val), b.CreateFMul(a0.dot, sgn)};
+                } else if (nm == "sin") {
+                    r = {un(llvm::Intrinsic::sin, a0.val),
+                         b.CreateFMul(un(llvm::Intrinsic::cos, a0.val), a0.dot)};
+                } else if (nm == "cos") {
+                    r = {un(llvm::Intrinsic::cos, a0.val),
+                         b.CreateFNeg(b.CreateFMul(un(llvm::Intrinsic::sin, a0.val), a0.dot))};
+                } else if (nm == "tan") {
+                    auto* t = b.CreateFDiv(un(llvm::Intrinsic::sin, a0.val),
+                                           un(llvm::Intrinsic::cos, a0.val));
+                    r = {t, b.CreateFMul(b.CreateFAdd(cst(1.0), b.CreateFMul(t, t)), a0.dot)};
+                } else if (nm == "exp") {
+                    auto* e = un(llvm::Intrinsic::exp, a0.val);
+                    r = {e, b.CreateFMul(e, a0.dot)};
+                } else if (nm == "log") {
+                    r = {un(llvm::Intrinsic::log, a0.val), b.CreateFDiv(a0.dot, a0.val)};
+                } else if (nm == "floor") {
+                    r = {un(llvm::Intrinsic::floor, a0.val), cst(0.0)};
+                } else if (nm == "ceil") {
+                    r = {un(llvm::Intrinsic::ceil, a0.val), cst(0.0)};
+                } else if ((nm == "min" || nm == "max") && a.size() == 2) {
+                    auto* pick = nm == "min" ? b.CreateFCmpOLT(a0.val, a[1].val)
+                                             : b.CreateFCmpOGT(a0.val, a[1].val);
+                    r = {b.CreateSelect(pick, a0.val, a[1].val),
+                         b.CreateSelect(pick, a0.dot, a[1].dot)};
+                } else if ((nm == "pow" || nm == "nth_root") && a.size() == 2) {
+                    DualVal e = a[1];
+                    const bool const_e = !varies(*n.children[1]);
+                    if (nm == "nth_root") {           // a^(1/b)
+                        auto* inv = b.CreateFDiv(cst(1.0), e.val);
+                        e = {inv, b.CreateFNeg(b.CreateFDiv(e.dot, b.CreateFMul(e.val, e.val)))};
+                    }
+                    auto* P = llvm::Intrinsic::getOrInsertDeclaration(&c.mod, llvm::Intrinsic::pow, {ty});
+                    auto* p   = b.CreateCall(P, {a0.val, e.val});
+                    auto* pm1 = b.CreateCall(P, {a0.val, b.CreateFSub(e.val, cst(1.0))});
+                    auto* d = b.CreateFMul(b.CreateFMul(e.val, pm1), a0.dot);   // e a^(e-1) a'
+                    if (!const_e) {                   // + a^e ln(a) e', for a > 0
+                        auto* pos = b.CreateFCmpOGT(a0.val, cst(0.0));
+                        auto* lg  = un(llvm::Intrinsic::log, b.CreateSelect(pos, a0.val, cst(1.0)));
+                        d = b.CreateFAdd(d, b.CreateSelect(pos, b.CreateFMul(b.CreateFMul(p, lg), e.dot), cst(0.0)));
+                    }
+                    r = {p, d};
+                } else if (nm == "asin" || nm == "acos" || nm == "atan" || nm == "atan2" || nm == "mod") {
+                    if (c.width > 1) { ok = false; break; }      // libm has no vector form
+                    if (nm == "asin" || nm == "acos") {
+                        auto* one_m = b.CreateFSub(cst(1.0), b.CreateFMul(a0.val, a0.val));
+                        auto* den = un(llvm::Intrinsic::sqrt, frep::llvm_compat::max_num(b, one_m, cst(1e-12)));
+                        auto* d = b.CreateFDiv(a0.dot, den);
+                        r = {libm1(nm == "asin" ? "asinf" : "acosf", a0.val),
+                             nm == "asin" ? d : b.CreateFNeg(d)};
+                    } else if (nm == "atan") {
+                        r = {libm1("atanf", a0.val),
+                             b.CreateFDiv(a0.dot, b.CreateFAdd(cst(1.0), b.CreateFMul(a0.val, a0.val)))};
+                    } else if (nm == "atan2" && a.size() == 2) {
+                        // d atan2(y, x) = (x y' - y x') / (x² + y²)
+                        const auto& yy = a0; const auto& xx = a[1];
+                        auto* den = frep::llvm_compat::max_num(
+                            b, b.CreateFAdd(b.CreateFMul(xx.val, xx.val), b.CreateFMul(yy.val, yy.val)), cst(1e-12));
+                        r = {libm2("atan2f", yy.val, xx.val),
+                             b.CreateFDiv(b.CreateFSub(b.CreateFMul(xx.val, yy.dot), b.CreateFMul(yy.val, xx.dot)), den)};
+                    } else if (nm == "mod" && a.size() == 2) {
+                        // fmod(a, b) = a - trunc(a/b) b  →  a' - trunc(a/b) b'
+                        auto* q = un(llvm::Intrinsic::trunc, b.CreateFDiv(a0.val, a[1].val));
+                        r = {libm2("fmodf", a0.val, a[1].val),
+                             b.CreateFSub(a0.dot, b.CreateFMul(q, a[1].dot))};
+                    } else ok = false;
+                } else {
+                    ok = false;
+                }
+                break;
+            }
+        }
+        if (ok) memo[&n] = r;
+        return r;
+    };
+
+    DualVal out = gen(*ast_);
+    if (!ok) return FRepNode::codegen_grad(c, x, y, z);   // the universal default
+    return out;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Dual-number GLSL of the expression (see emit_glsl_dual in the header).
+// ═════════════════════════════════════════════════════════════════════════════
+bool CustomExprNode::emit_glsl_dual_ast(std::ostream& out, const expr::Node& n,
+                                        const TemplateRegistry* reg,
+                                        const std::string& dx, const std::string& dy,
+                                        const std::string& dz) {
+    using Kind = expr::Node::Kind;
+    auto lit = [](float v) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.9g", v);
+        std::string s(buf);
+        if (s.find('.') == std::string::npos && s.find('e') == std::string::npos) s += ".0";
+        return s;
+    };
+    switch (n.kind) {
+        case Kind::Number:
+            out << "d_const(" << lit(n.num) << ")";
+            return true;
+        case Kind::Var:
+            if (n.ident == "x") { out << dx; return true; }
+            if (n.ident == "y") { out << dy; return true; }
+            if (n.ident == "z") { out << dz; return true; }
+            return false;                              // a template's parameter
+        case Kind::Const:
+            out << "d_const(" << (n.ident == "pi" ? "3.14159265358979"
+                                : n.ident == "e"  ? "2.71828182845905" : "0.0") << ")";
+            return true;
+        case Kind::UnaryNeg:
+            out << "d_neg(";
+            if (!emit_glsl_dual_ast(out, *n.children[0], reg, dx, dy, dz)) return false;
+            out << ")";
+            return true;
+        case Kind::BinOp: {
+            const char* fn = "d_add";
+            switch (n.bop) {
+                case expr::Op::Add: fn = "d_add"; break;
+                case expr::Op::Sub: fn = "d_sub"; break;
+                case expr::Op::Mul: fn = "d_mul"; break;
+                case expr::Op::Div: fn = "d_div"; break;
+            }
+            out << fn << "(";
+            if (!emit_glsl_dual_ast(out, *n.children[0], reg, dx, dy, dz)) return false;
+            out << ", ";
+            if (!emit_glsl_dual_ast(out, *n.children[1], reg, dx, dy, dz)) return false;
+            out << ")";
+            return true;
+        }
+        case Kind::Call: {
+            if (reg && reg->find(n.ident)) return false;
+            static const char* const kUnary[]  = {"sin", "cos", "tan", "sqrt", "abs", "exp",
+                                                  "log", "floor", "ceil", "atan", "asin", "acos"};
+            static const char* const kBinary[] = {"pow", "nth_root", "atan2", "mod", "min", "max"};
+            bool known = false;
+            for (auto* u : kUnary)  if (n.ident == u && n.children.size() == 1) known = true;
+            for (auto* bn : kBinary) if (n.ident == bn && n.children.size() == 2) known = true;
+            if (!known) return false;
+            out << "d_" << n.ident << "(";
+            for (std::size_t i = 0; i < n.children.size(); ++i) {
+                if (i) out << ", ";
+                if (!emit_glsl_dual_ast(out, *n.children[i], reg, dx, dy, dz)) return false;
+            }
+            out << ")";
+            return true;
+        }
+    }
+    return false;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Bounds by interval arithmetic over the AST (see aabb() in the header).
+// ═════════════════════════════════════════════════════════════════════════════
+namespace {
+
+struct Iv { float lo, hi; };
+constexpr float kIvBig = 1e30f;   // "unknown": never lets a cell be discarded
+inline Iv iv_big() { return {-kIvBig, kIvBig}; }
+
+// sin/cos over an interval: the endpoints, widened to ±1 where an extremum
+// of the function lies inside the interval.
+Iv iv_trig(bool is_sin, const Iv& a) {
+    constexpr float two_pi = 2.0f * std::numbers::pi_v<float>;
+    if (a.hi - a.lo >= two_pi) return {-1.0f, 1.0f};
+    float u = is_sin ? std::sin(a.lo) : std::cos(a.lo);
+    float v = is_sin ? std::sin(a.hi) : std::cos(a.hi);
+    Iv r{std::min(u, v), std::max(u, v)};
+    auto contains = [&](float base) {   // is base + 2πk in [lo, hi] for some k?
+        float k = std::ceil((a.lo - base) / two_pi);
+        return base + k * two_pi <= a.hi;
+    };
+    const float half_pi = 0.5f * std::numbers::pi_v<float>;
+    if (contains(is_sin ? half_pi : 0.0f))                       r.hi = 1.0f;
+    if (contains(is_sin ? -half_pi : std::numbers::pi_v<float>)) r.lo = -1.0f;
+    return r;
+}
+
+std::optional<Iv> ival(const expr::Node& n, const Iv& X, const Iv& Y, const Iv& Z,
+                       const TemplateRegistry* reg) {
+    using Kind = expr::Node::Kind;
+    auto mono = [](float (*f)(float), const Iv& a) {
+        float u = f(a.lo), v = f(a.hi);
+        return Iv{std::min(u, v), std::max(u, v)};
+    };
+    switch (n.kind) {
+        case Kind::Number: return Iv{n.num, n.num};
+        case Kind::Var:
+            if (n.ident == "x") return X;
+            if (n.ident == "y") return Y;
+            if (n.ident == "z") return Z;
+            return std::nullopt;
+        case Kind::Const: {
+            float v = n.ident == "pi" ? std::numbers::pi_v<float>
+                    : n.ident == "e"  ? std::numbers::e_v<float> : 0.0f;
+            return Iv{v, v};
+        }
+        case Kind::UnaryNeg: {
+            auto a = ival(*n.children[0], X, Y, Z, reg);
+            if (!a) return std::nullopt;
+            return Iv{-a->hi, -a->lo};
+        }
+        case Kind::BinOp: {
+            auto l = ival(*n.children[0], X, Y, Z, reg);
+            auto r = ival(*n.children[1], X, Y, Z, reg);
+            if (!l || !r) return std::nullopt;
+            switch (n.bop) {
+                case expr::Op::Add: return Iv{l->lo + r->lo, l->hi + r->hi};
+                case expr::Op::Sub: return Iv{l->lo - r->hi, l->hi - r->lo};
+                case expr::Op::Mul: {
+                    float p[4] = {l->lo * r->lo, l->lo * r->hi, l->hi * r->lo, l->hi * r->hi};
+                    return Iv{std::min({p[0], p[1], p[2], p[3]}), std::max({p[0], p[1], p[2], p[3]})};
+                }
+                case expr::Op::Div: {
+                    if (r->lo <= 0.0f && r->hi >= 0.0f) return iv_big();
+                    Iv inv{1.0f / r->hi, 1.0f / r->lo};
+                    float p[4] = {l->lo * inv.lo, l->lo * inv.hi, l->hi * inv.lo, l->hi * inv.hi};
+                    return Iv{std::min({p[0], p[1], p[2], p[3]}), std::max({p[0], p[1], p[2], p[3]})};
+                }
+            }
+            return iv_big();
+        }
+        case Kind::Call: {
+            const auto& nm = n.ident;
+            if (reg && reg->find(nm)) return std::nullopt;
+            std::vector<Iv> a;
+            for (const auto& ch : n.children) {
+                auto v = ival(*ch, X, Y, Z, reg);
+                if (!v) return std::nullopt;
+                a.push_back(*v);
+            }
+            if (a.empty()) return std::nullopt;
+            const Iv& a0 = a[0];
+            if (nm == "sqrt")  return Iv{std::sqrt(std::max(a0.lo, 0.0f)), std::sqrt(std::max(a0.hi, 0.0f))};
+            if (nm == "abs") {
+                if (a0.lo >= 0.0f) return a0;
+                if (a0.hi <= 0.0f) return Iv{-a0.hi, -a0.lo};
+                return Iv{0.0f, std::max(-a0.lo, a0.hi)};
+            }
+            if (nm == "sin")   return iv_trig(true, a0);
+            if (nm == "cos")   return iv_trig(false, a0);
+            if (nm == "tan")   return iv_big();
+            if (nm == "exp")   return mono([](float v) { return std::exp(v); }, a0);
+            if (nm == "log") {
+                if (a0.hi <= 0.0f) return iv_big();
+                return Iv{a0.lo > 0.0f ? std::log(a0.lo) : -kIvBig, std::log(a0.hi)};
+            }
+            if (nm == "floor") return mono([](float v) { return std::floor(v); }, a0);
+            if (nm == "ceil")  return mono([](float v) { return std::ceil(v); }, a0);
+            if (nm == "atan")  return mono([](float v) { return std::atan(v); }, a0);
+            if (nm == "asin" || nm == "acos") {
+                Iv c{std::clamp(a0.lo, -1.0f, 1.0f), std::clamp(a0.hi, -1.0f, 1.0f)};
+                return nm == "asin" ? mono([](float v) { return std::asin(v); }, c)
+                                    : mono([](float v) { return std::acos(v); }, c);
+            }
+            if (a.size() != 2) return iv_big();
+            const Iv& a1 = a[1];
+            if (nm == "min") return Iv{std::min(a0.lo, a1.lo), std::min(a0.hi, a1.hi)};
+            if (nm == "max") return Iv{std::max(a0.lo, a1.lo), std::max(a0.hi, a1.hi)};
+            if (nm == "atan2") return Iv{-std::numbers::pi_v<float>, std::numbers::pi_v<float>};
+            if (nm == "mod") {
+                if (a1.lo == a1.hi && a1.lo > 0.0f) return Iv{-a1.lo, a1.lo};
+                return iv_big();
+            }
+            if (nm == "pow" || nm == "nth_root") {
+                if (a1.lo != a1.hi) return iv_big();          // only a constant exponent
+                float e = nm == "pow" ? a1.lo : (a1.lo != 0.0f ? 1.0f / a1.lo : 0.0f);
+                if (a0.lo >= 0.0f) {
+                    float u = std::pow(a0.lo, e), v = std::pow(a0.hi, e);
+                    return Iv{std::min(u, v), std::max(u, v)};
+                }
+                const bool integer = std::floor(e) == e;
+                if (integer && std::fmod(e, 2.0f) == 0.0f) {   // even power: symmetric
+                    float m = std::max(std::fabs(a0.lo), std::fabs(a0.hi));
+                    float lo = (a0.lo <= 0.0f && a0.hi >= 0.0f)
+                             ? 0.0f : std::pow(std::min(std::fabs(a0.lo), std::fabs(a0.hi)), e);
+                    return Iv{lo, std::pow(m, e)};
+                }
+                if (integer) {                                  // odd power: monotone
+                    float u = std::pow(a0.lo, e), v = std::pow(a0.hi, e);
+                    return Iv{std::min(u, v), std::max(u, v)};
+                }
+                return iv_big();                                // fractional power of a signed base
+            }
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+FRepNode::AABB CustomExprNode::infer_bounds() const {
+    ensure_parsed();
+    constexpr float R = 64.0f;      // search box: [-R, R]³
+    constexpr int   kMaxDepth = 8;  // cells of 0.5 units at the surface
+    const Iv root{-R, R};
+    if (!ival(*ast_, root, root, root, reg_)) return AABB::infinite();
+
+    float bx0 = kIvBig, by0 = kIvBig, bz0 = kIvBig, bx1 = -kIvBig, by1 = -kIvBig, bz1 = -kIvBig;
+    bool any = false, edge = false;
+    std::function<void(float, float, float, float, int)> rec =
+        [&](float x0, float y0, float z0, float s, int depth) {
+            auto iv = ival(*ast_, {x0, x0 + s}, {y0, y0 + s}, {z0, z0 + s}, reg_);
+            if (iv && iv->lo > 0.0f) return;                 // positive throughout: outside
+            const bool inside = iv && iv->hi < 0.0f;         // negative throughout: no surface
+            if (!inside && depth < kMaxDepth) {
+                const float h = 0.5f * s;
+                for (int i = 0; i < 8; ++i)
+                    rec(x0 + ((i & 1) ? h : 0.0f), y0 + ((i & 2) ? h : 0.0f),
+                        z0 + ((i & 4) ? h : 0.0f), h, depth + 1);
+                return;
+            }
+            any = true;
+            bx0 = std::min(bx0, x0); by0 = std::min(by0, y0); bz0 = std::min(bz0, z0);
+            bx1 = std::max(bx1, x0 + s); by1 = std::max(by1, y0 + s); bz1 = std::max(bz1, z0 + s);
+            if (x0 <= -R || y0 <= -R || z0 <= -R || x0 + s >= R || y0 + s >= R || z0 + s >= R)
+                edge = true;                                   // the field reaches the box
+        };
+    rec(-R, -R, -R, 2.0f * R, 0);
+    const AABB box = (!any || edge) ? AABB::infinite() : AABB{bx0, by0, bz0, bx1, by1, bz1};
+    if (std::getenv("FREP_DEBUG_BOUNDS")) {
+        if (!any || edge)
+            std::fprintf(stderr, "custom-expr bounds: unbounded (%s) for %s\n",
+                         !any ? "no cell kept" : "reaches the search box", expr_.c_str());
+        else
+            std::fprintf(stderr, "custom-expr bounds: [%g %g %g]..[%g %g %g] for %s\n",
+                         box.min_x, box.min_y, box.min_z, box.max_x, box.max_y, box.max_z,
+                         expr_.c_str());
+    }
+    return box;
+}
+
+FRepNode::AABB CustomExprNode::aabb() const {
+    if (has_bounds_) return bounds_;
+    if (!inferred_) {
+        inferred_box_ = infer_bounds();   // idempotent; a concurrent caller recomputes the same
+        inferred_ = true;
+    }
+    return inferred_box_;
 }
 
 } // namespace frep

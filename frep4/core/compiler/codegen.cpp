@@ -1158,7 +1158,9 @@ llvm::Function* SceneCodegen::emit_tracer(const SceneGraph& scene,
     bool scene_bounded = false;
     FRepNode::AABB scene_box{};
     {
-        auto finite = [](float v){ return std::isfinite(v); };
+        // AABB::infinite() is ±1e9, which std::isfinite accepts; a box that
+        // large is no bound. Anything past 1e8 counts as unbounded.
+        auto finite = [](float v){ return std::isfinite(v) && std::fabs(v) < 1e8f; };
         for (auto& [id, obj] : scene.objects()) {
             if (!obj.visible || !obj.geometry) continue;
             FRepNode::AABB b = obj.geometry->aabb();
@@ -1183,7 +1185,12 @@ llvm::Function* SceneCodegen::emit_tracer(const SceneGraph& scene,
             scene_box.max_x += m; scene_box.max_y += m; scene_box.max_z += m;
         }
     }
-    const bool use_bbox_clip = scene_bounded && cfg_.bbox_clip;
+    // FREP_BBOX_CLIP=0 disables the clip for an A/B against the plain march.
+    static const bool clip_env_off = [] {
+        const char* s = std::getenv("FREP_BBOX_CLIP");
+        return s && s[0] == '0';
+    }();
+    const bool use_bbox_clip = scene_bounded && cfg_.bbox_clip && !clip_env_off;
 
     // Optional: shadow and AO. Pass nullptr if they are not needed.
     llvm::Function* shadow_fn = cfg_.enable_shadows ? emit_shadow(sdf_fn) : nullptr;

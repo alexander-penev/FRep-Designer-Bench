@@ -286,6 +286,18 @@ public:
         return false;
     }
 
+    // Dual-number form of emit_glsl for the analytic normal: write a GLSL
+    // `Dual` (value, gradient) expression over the d_* helpers the compute
+    // emitter declares, with `dx`, `dy`, `dz` naming the Dual coordinates in
+    // scope. Default: not available, and the emitter falls back to finite
+    // differences for the object. Built-in kinds are handled by the emitter's
+    // own switch; this is for plugin kinds (CustomExpr implements it).
+    virtual bool emit_glsl_dual(std::ostream& out, const std::string& dx,
+                                const std::string& dy, const std::string& dz) const {
+        (void)out; (void)dx; (void)dy; (void)dz;
+        return false;
+    }
+
     virtual ~FRepNode() = default;
 };
 

@@ -26,6 +26,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
 
+#include <cstdlib>
 #include <memory>
 #include <unordered_map>
 #include <ostream>
@@ -162,6 +163,14 @@ public:
     llvm::Value* codegen(CgCtx& c, llvm::Value* x,
                          llvm::Value* y, llvm::Value* z) const override;
 
+    // Forward-mode AD in LLVM IR over the expression AST: value and
+    // directional derivative together, one pass over the expression instead
+    // of the two extra field evaluations per axis the finite-difference
+    // default costs (six evaluations for a normal). Falls back to that
+    // default for a user-template call and, in the SIMD path, for the libm
+    // functions that have no vector form.
+    DualVal codegen_grad(CgCtx& c, DualVal x, DualVal y, DualVal z) const override;
+
     std::size_t structural_hash() const noexcept override {
         return std::hash<std::string>{}(expr_) ^ 0xCAFE'BABEull;
     }
@@ -171,14 +180,18 @@ public:
 
     const char* type_name() const noexcept override { return "CustomExpr"; }
 
-    // A CustomExpr has no analyzable bounds, so it defaults to an infinite AABB.
-    // That defeats any spatial acceleration (the RTX multi-BLAS TLAS builds one
-    // box per group, and an infinite box makes the broad phase cull nothing).
-    // When the author knows the geometry's extent — a bounded prototype used as
-    // an instance — set it here so the BVH can prune. Purely an acceleration
-    // hint; it must conservatively contain the surface or the render clips.
-    void set_bounds(const AABB& b) { bounds_ = b; }
-    AABB aabb() const override { return bounds_; }
+    // Bounds. An author who knows the extent sets them (set_bounds; the JSON
+    // "aabb" field); otherwise they are inferred once by interval arithmetic
+    // over the expression (infer_bounds): an octree over a 128-unit box keeps
+    // the cells whose field interval can reach zero, and their union is the
+    // box. The result is infinite — which disables the ray-box clip, the tile
+    // cull's and the RTX broad phase's use of it — when the kept region
+    // reaches the edge of the search box (a plane, a bare gyroid), when the
+    // expression uses an operation the interval evaluator does not bound, or
+    // when it calls a user template. Explicit bounds must conservatively
+    // contain the surface or the render clips.
+    void set_bounds(const AABB& b) { bounds_ = b; has_bounds_ = true; }
+    AABB aabb() const override;
 
     bool emit_glsl(std::ostream& out,
                    const std::vector<std::string>& /*child_exprs*/,
@@ -190,12 +203,37 @@ public:
         return true;
     }
 
+    // Dual-number GLSL of the expression: a `Dual` (value, gradient)
+    // expression over the d_* helpers the compute emitter declares, with
+    // `dx`, `dy`, `dz` naming the Dual coordinates in scope. False when the
+    // expression calls a user template (no dual form of those yet), which
+    // leaves the caller its finite-difference normal.
+    bool emit_glsl_dual(std::ostream& out, const std::string& dx,
+                        const std::string& dy, const std::string& dz) const override {
+        ensure_parsed();
+        // FREP_CUSTOMEXPR_FD=1: keep the central-difference normal (A/B).
+        static const bool force_fd = [] {
+            const char* s = std::getenv("FREP_CUSTOMEXPR_FD");
+            return s && s[0] == '1';
+        }();
+        if (force_fd) return false;
+        return emit_glsl_dual_ast(out, *ast_, reg_, dx, dy, dz);
+    }
+
     const std::string& expression() const { return expr_; }
 
 private:
     std::string expr_;
     const TemplateRegistry* reg_ = nullptr;   // user templates in scope (non-owning)
-    AABB bounds_ = AABB::infinite();          // acceleration hint (see set_bounds)
+    AABB bounds_ = AABB::infinite();          // explicit bounds (see set_bounds)
+    bool has_bounds_ = false;
+    mutable bool inferred_ = false;           // infer_bounds() ran
+    mutable AABB inferred_box_ = AABB::infinite();
+    AABB infer_bounds() const;
+    static bool emit_glsl_dual_ast(std::ostream& out, const expr::Node& n,
+                                   const TemplateRegistry* reg,
+                                   const std::string& dx, const std::string& dy,
+                                   const std::string& dz);
 
     // Cached AST — parsed lazily on first back-end call.
 public:
