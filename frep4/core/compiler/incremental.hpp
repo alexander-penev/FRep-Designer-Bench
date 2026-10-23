@@ -114,8 +114,9 @@ public:
 
         auto mod = cg.take_module();
 
-        // Always a fresh JitEngine to avoid symbol collisions in the JITDylib.
-        jit_ = std::make_unique<JitEngine>();
+        // One engine; load() removes the previous module before adding the
+        // new one, so there is no symbol collision and no JIT per recompile.
+        if (!jit_) jit_ = std::make_unique<JitEngine>();
         auto fn_or = jit_->load(std::move(mod), std::move(ctx));
         if (!fn_or) return std::unexpected(fn_or.error());
 

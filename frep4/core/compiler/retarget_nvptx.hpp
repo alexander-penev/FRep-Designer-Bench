@@ -30,6 +30,7 @@
 // sm_50); FREP_NVPTX_NO_O3=1 skips step 3 for an A/B; FREP_DUMP_PTX=<file>
 // writes the PTX out, for `ptxas -v` register and spill counts.
 
+#include "core/compiler/fast_math.hpp"
 #include "core/compiler/llvm_compat.hpp"
 
 #include <llvm/Analysis/CGSCCPassManager.h>
@@ -299,8 +300,9 @@ public:
         // The middle end, with the NVPTX cost model. Before this the GPU
         // module went straight to the backend: no inlining, no GVN across the
         // three gradient evaluations, no hoisting of parameter loads out of
-        // the march loop. No fast-math flags are set anywhere in codegen, so
-        // O3 reassociates nothing and the pixels stay bit-identical.
+        // the march loop. The same relaxed FP flags the CPU JIT applies go on
+        // first (fast_math.hpp), so both IR paths fuse and reassociate alike.
+        apply_fast_math(mod);
         if (!std::getenv("FREP_NVPTX_NO_O3")) {
             llvm::PassBuilder             pb(tm.get());
             llvm::LoopAnalysisManager     lam;

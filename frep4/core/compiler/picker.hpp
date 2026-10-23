@@ -46,7 +46,7 @@ public:
         cg.emit_scene_pick(scene);
         auto mod = cg.take_module();
 
-        jit_ = std::make_unique<JitEngine>();
+        if (!jit_) jit_ = std::make_unique<JitEngine>();   // load_as replaces the old module
         auto fn_or = jit_->load_as<ScenePickFn>(
             std::move(mod), std::move(ctx), "scene_pick");
         if (!fn_or)

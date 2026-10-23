@@ -73,7 +73,10 @@ public:
                 return r;
             }
             auto mod = cg.take_module();
-            jit_ = std::make_unique<JitEngine>();
+            // One engine for the executor's lifetime; load() replaces the
+            // previous module, so a recompile neither leaks the old code nor
+            // pays for a new JIT.
+            if (!jit_) jit_ = std::make_unique<JitEngine>();
             auto fn_or = jit_->load(std::move(mod), std::move(ctx));
             if (!fn_or) { r.error = "jit: " + fn_or.error(); return r; }
             cached_fn_ = *fn_or;
