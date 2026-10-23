@@ -45,14 +45,21 @@ struct Run {
     double ms = 0;          // wall time for the whole sequence
     double mpix_s = 0;      // aggregate throughput
     double joules = -1;     // total energy (-1 = unavailable)
+    long   frames = 0;      // frames actually rendered in the window
     std::vector<long> tiles_per_exec;
 };
 
-// Render `frames` frames of `W x H`, tiles pulled from a shared queue by one
-// thread per executor. Returns aggregate throughput over the whole sequence.
+// Render at least `frames` frames of `W x H`, and keep rendering until at
+// least `min_ms` have passed, tiles pulled from a shared queue by one thread
+// per executor. Returns aggregate throughput over the whole sequence.
+//
+// The time floor is for the energy counters: NVML integrates power on a
+// 10–100 ms cadence, and ten frames of the GPU path are now under 50 ms of
+// GPU work, which it does not resolve above the idle floor. Rendering the
+// same thing for half a second and dividing by the frames done does.
 Run run_queue(std::vector<IExecutor*> execs, const SceneGraph& scene,
-              int W, int H, int tile_px, int frames,
-              EnergyCounter* cpu_e, EnergyCounter* gpu_e) {
+              int W, int H, int tile_px, int frames, double min_ms,
+              QueuePolicy policy, EnergyCounter* cpu_e, EnergyCounter* gpu_e) {
     // Tile grid (same decomposition for every configuration, so single-path and
     // combined runs do identical work).
     std::vector<Tile> tiles;
@@ -68,21 +75,31 @@ Run run_queue(std::vector<IExecutor*> execs, const SceneGraph& scene,
     if (cpu_e && cpu_e->available()) cpu_e->begin();
     if (gpu_e && gpu_e->available()) gpu_e->begin();
     auto t0 = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&] {
+        return std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - t0).count();
+    };
 
-    for (int f = 0; f < frames; ++f) {
-        std::atomic<size_t> next{0};
+    long done = 0;
+    while (done < frames || elapsed_ms() < min_ms) {
+        TileQueueCursor cursor(tiles.size(), execs.size(), policy);
         std::vector<std::thread> pool;
         for (size_t e = 0; e < execs.size(); ++e) {
             pool.emplace_back([&, e] {
+                double last_ms = 0;
                 for (;;) {
-                    size_t i = next.fetch_add(1, std::memory_order_relaxed);
-                    if (i >= tiles.size()) break;
+                    size_t i = cursor.take(e, last_ms);
+                    if (i == TileQueueCursor::npos) break;
+                    auto tt0 = std::chrono::steady_clock::now();
                     TileResult r = execs[e]->render(scene, W, H, tiles[i]);
+                    last_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - tt0).count();
                     if (r.ok) counts[e].fetch_add(1, std::memory_order_relaxed);
                 }
             });
         }
         for (auto& t : pool) t.join();
+        ++done;
     }
 
     auto t1 = std::chrono::steady_clock::now();
@@ -91,7 +108,8 @@ Run run_queue(std::vector<IExecutor*> execs, const SceneGraph& scene,
     if (gpu_e && gpu_e->available()) { if (auto v = gpu_e->end()) { j += *v; any_e = true; } }
 
     out.ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    double pixels = (double)W * H * frames;
+    out.frames = done;
+    double pixels = (double)W * H * done;
     out.mpix_s = out.ms > 0 ? pixels / (out.ms / 1e3) / 1e6 : 0;
     out.joules = any_e ? j : -1;
     for (size_t e = 0; e < execs.size(); ++e) out.tiles_per_exec[e] = counts[e].load();
@@ -143,6 +161,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     int R = 800, tile_px = 128, frames = 10, rounds = 5, warmup_s = 4;
+    // Each run renders at least `frames` frames and at least min_ms (see
+    // run_queue); the queue's tail policy is Auto unless --policy says plain.
+    double min_ms = 500.0;
+    QueuePolicy policy = QueuePolicy::Auto;
     std::vector<std::string> scenes;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -152,6 +174,12 @@ int main(int argc, char** argv) {
         else if (a == "--frames") frames = next(frames);
         else if (a == "--rounds") rounds = next(rounds);
         else if (a == "--warmup") warmup_s = next(warmup_s);
+        else if (a == "--min-ms") min_ms = next(500);
+        else if (a == "--policy" && i + 1 < argc) {
+            std::string p = argv[++i];
+            policy = p == "plain" ? QueuePolicy::Plain
+                   : p == "tail"  ? QueuePolicy::FastestTail : QueuePolicy::Auto;
+        }
         else scenes.push_back(a);
     }
 
@@ -201,7 +229,8 @@ int main(int argc, char** argv) {
             auto t_warm = std::chrono::steady_clock::now();
             while (std::chrono::duration<double>(
                        std::chrono::steady_clock::now() - t_warm).count() < warmup_s) {
-                run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, 2, nullptr, nullptr);
+                run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, 2, 0.0, policy,
+                          nullptr, nullptr);
             }
         }
 
@@ -216,38 +245,45 @@ int main(int argc, char** argv) {
         if (const char* t = std::getenv("FREP4_CPU_THREADS")) cpu_threads = std::atoi(t);
         if (cpu_threads <= 0) cpu_threads = (int)std::thread::hardware_concurrency();
 
-        std::vector<Run> vc, vg, vh;
+        // Four modes per round: each path alone, the combined queue with the
+        // chosen policy, and the combined queue with the plain policy, so the
+        // table can show what the tail rule is worth.
+        std::vector<Run> vc, vg, vh, vp;
         for (int r = 0; r < rounds; ++r) {
-            vc.push_back(run_queue({cpu.get()},            scene, R, R, tile_px, frames, cpu_e.get(), nullptr));
+            vc.push_back(run_queue({cpu.get()},            scene, R, R, tile_px, frames, min_ms, policy, cpu_e.get(), nullptr));
             {
                 BusyLoad load(cpu_threads);   // match the combined run's CPU state
-                vg.push_back(run_queue({gpu.get()},        scene, R, R, tile_px, frames, nullptr, gpu_e.get()));
+                vg.push_back(run_queue({gpu.get()},        scene, R, R, tile_px, frames, min_ms, policy, nullptr, gpu_e.get()));
             }
-            vh.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, cpu_e.get(), gpu_e.get()));
+            vh.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, min_ms, policy, cpu_e.get(), gpu_e.get()));
+            vp.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, min_ms, QueuePolicy::Plain, cpu_e.get(), gpu_e.get()));
         }
         auto median_run = [](std::vector<Run> v) {
             std::sort(v.begin(), v.end(),
                       [](const Run& a, const Run& b) { return a.mpix_s < b.mpix_s; });
             return v[v.size() / 2];
         };
-        Run rc = median_run(vc), rg = median_run(vg), rh = median_run(vh);
+        Run rc = median_run(vc), rg = median_run(vg), rh = median_run(vh), rp = median_run(vp);
 
         double sum = rc.mpix_s + rg.mpix_s;
         double eff = sum > 0 ? 100.0 * rh.mpix_s / sum : 0;
-        std::printf("%-14s %9.2f %9.2f %9.2f %9.2f %5.0f%%  %ld/%ld\n",
+        double eff_plain = sum > 0 ? 100.0 * rp.mpix_s / sum : 0;
+        std::printf("%-14s %9.2f %9.2f %9.2f %9.2f %5.0f%%  %ld/%ld   plain %9.2f %5.0f%%  %ld/%ld\n",
                     name.c_str(), rc.mpix_s, rg.mpix_s, sum, rh.mpix_s, eff,
-                    rh.tiles_per_exec[0], rh.tiles_per_exec[1]);
+                    rh.tiles_per_exec[0], rh.tiles_per_exec[1],
+                    rp.mpix_s, eff_plain, rp.tiles_per_exec[0], rp.tiles_per_exec[1]);
         std::fflush(stdout);
 
         // CSV rows for the results table (throughput in Mpix/s; energy if present).
         auto emit = [&](const char* backend, const Run& r) {
-            double pix = (double)R * R * frames;
+            double pix = (double)R * R * r.frames;
             double mk = r.joules > 0 ? pixels_per_kwh(pix, r.joules) / 1e6 : -1;
             std::fprintf(stderr, "%s,%s,%s,%s,%d,%.3f,%.3f,%.3f,%.4f\n",
                          "frep4", backend, name.c_str(), "tilequeue", R,
                          r.ms, r.mpix_s, r.joules, mk);
         };
         emit("cpu_ir", rc); emit("gpu_glsl", rg); emit("hetero_queue", rh);
+        emit("hetero_plain", rp);
     }
     return 0;
 }
