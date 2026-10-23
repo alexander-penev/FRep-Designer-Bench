@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -60,14 +61,24 @@ enum class PathKind {
 
 const char* path_kind_name(PathKind k);
 
+// How a TileResult carries its pixels. The GPU paths produce the frame as
+// 8 bits per channel and the CPU path as floats; handing each back in its
+// own form costs nothing, while widening a 512² RGBA8 frame to float was
+// 0.4 ms of a 0.55 ms GPU frame. TracerConfig::output_format chooses; a
+// consumer that needs floats whatever the path calls floats() / to_float().
+enum class PixelFormat { Float, RGBA8 };
+
 // The result of rendering one Tile on one path: the pixels for exactly
-// that tile region (row-major RGBA float, width()*height()*4), plus
+// that tile region (row-major RGBA, width()*height()*4 values, in `rgba`
+// as floats or in `rgba8` as bytes according to `format`), plus
 // per-execution metrics. `ok` is false if that path failed (e.g. no
 // Vulkan device); `error` then explains.
 struct TileResult {
     Tile        tile;
     PathKind    path;
-    std::vector<float> rgba;     // tile.width()*tile.height()*4
+    PixelFormat format = PixelFormat::Float;
+    std::vector<float>        rgba;    // when format == Float
+    std::vector<std::uint8_t> rgba8;   // when format == RGBA8
     bool        ok = false;
     std::string error;
     // Metrics (per this tile/path execution).
@@ -75,6 +86,41 @@ struct TileResult {
     double      render_ms  = 0;  // the actual dispatch
     std::size_t peak_rss_kb = 0;
     int         threads_used = 0;
+
+    std::size_t pixel_count() const {
+        return format == PixelFormat::Float ? rgba.size() / 4 : rgba8.size() / 4;
+    }
+
+    // The pixels as floats whatever the format: `rgba` itself, or `rgba8`
+    // widened into `scratch` (which the returned reference then aliases).
+    const std::vector<float>& floats(std::vector<float>& scratch) const {
+        if (format == PixelFormat::Float) return rgba;
+        scratch.resize(rgba8.size());
+        constexpr float k = 1.0f / 255.0f;
+        for (std::size_t i = 0; i < rgba8.size(); ++i) scratch[i] = rgba8[i] * k;
+        return scratch;
+    }
+
+    // Convert in place.
+    void to_float() {
+        if (format == PixelFormat::Float) return;
+        rgba.resize(rgba8.size());
+        constexpr float k = 1.0f / 255.0f;
+        for (std::size_t i = 0; i < rgba8.size(); ++i) rgba[i] = rgba8[i] * k;
+        rgba8.clear(); rgba8.shrink_to_fit();
+        format = PixelFormat::Float;
+    }
+    void to_rgba8() {
+        if (format == PixelFormat::RGBA8) return;
+        rgba8.resize(rgba.size());
+        for (std::size_t i = 0; i < rgba.size(); ++i) {
+            float v = rgba[i];
+            v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            rgba8[i] = static_cast<std::uint8_t>(v * 255.0f + 0.5f);
+        }
+        rgba.clear(); rgba.shrink_to_fit();
+        format = PixelFormat::RGBA8;
+    }
 };
 
 // An executor renders a given Tile of a scene on one specific path. The
@@ -238,6 +284,37 @@ enum class RunMode {
                   // proportionally more tiles — self-balancing, no calibration.
 };
 
+// How a dynamic tile queue hands out its last tiles.
+//   Plain       — every executor pulls until the queue is empty. The slowest
+//                 can then start a tile the fastest would have finished many
+//                 times over, and the frame waits for it: measured at 800² with
+//                 the GPU 5–20× the CPU's speed, the combined run reached only
+//                 84–96% of the two paths' summed throughput, and on the
+//                 heaviest scenes was slower than the GPU alone.
+//   FastestTail — an executor whose tiles take k times the fastest's does not
+//                 start one when fewer than k tiles remain; the tail goes to
+//                 the fast one. What Auto means today.
+enum class QueuePolicy { Auto, Plain, FastestTail };
+
+// The shared cursor of a dynamic tile queue, with the policy applied. One
+// per frame; every executor's worker calls take() until it returns npos.
+class TileQueueCursor {
+public:
+    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+    TileQueueCursor(std::size_t n_tiles, std::size_t n_execs, QueuePolicy p);
+    // Next tile for executor `e`, or npos when it should stop. `last_ms` is
+    // how long its previous tile took (<= 0 when it has none yet); it feeds a
+    // per-executor smoothed tile time the tail rule compares.
+    std::size_t take(std::size_t e, double last_ms);
+    std::size_t taken() const { return next_; }
+private:
+    std::size_t          n_;
+    QueuePolicy          policy_;
+    std::mutex           m_;
+    std::size_t          next_ = 0;
+    std::vector<double>  ema_;   // per-executor tile time, smoothed
+};
+
 // The wall-clock and sum-of-parts timings of a run — concurrent execution
 // should make wall < sum when paths overlap.
 struct RunTimings {
@@ -267,7 +344,11 @@ public:
                         const std::vector<IExecutor*>& executors,
                         RunMode mode = RunMode::Concurrent);
 
+    // Tail policy of RunMode::DynamicQueue (see QueuePolicy). Auto by default.
+    void set_queue_policy(QueuePolicy p) { queue_policy_ = p; }
+
 private:
+    QueuePolicy               queue_policy_ = QueuePolicy::Auto;
     const IDecomposeStrategy& decompose_;
     const IDispatchStrategy&  dispatch_;
     const IMergeStrategy&     merge_;

@@ -87,26 +87,104 @@ static std::string cu_err(CUresult e) {
     return s ? s : ("CUresult " + std::to_string(e));
 }
 
+// The pack kernel: one thread per pixel, float4 in → RGBA8 (one u32) out.
+// clamp to [0,1], scale by 255, round to nearest; r in the low byte, so the
+// bytes in memory are r,g,b,a like the compute path's R8G8B8A8 image. A
+// hand-written PTX string rather than a second LLVM lowering: it is twenty
+// instructions and never changes.
+static const char* kPackPtx = R"PTX(
+.version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry frep_pack_rgba8(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n)
+{
+    .reg .pred %p<2>;
+    .reg .b32  %r<16>;
+    .reg .b64  %rd<10>;
+    .reg .f32  %f<8>;
+
+    ld.param.u64 %rd1, [in_ptr];
+    ld.param.u64 %rd2, [out_ptr];
+    ld.param.u32 %r1, [n];
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.s32 %r5, %r2, %r3, %r4;
+    setp.ge.u32 %p1, %r5, %r1;
+    @%p1 bra DONE;
+
+    cvta.to.global.u64 %rd3, %rd1;
+    cvta.to.global.u64 %rd4, %rd2;
+    mul.wide.u32 %rd5, %r5, 16;
+    add.s64 %rd6, %rd3, %rd5;
+    ld.global.v4.f32 {%f1, %f2, %f3, %f4}, [%rd6];
+
+    max.f32 %f1, %f1, 0f00000000;
+    min.f32 %f1, %f1, 0f3F800000;
+    mul.f32 %f1, %f1, 0f437F0000;
+    cvt.rni.u32.f32 %r6, %f1;
+    max.f32 %f2, %f2, 0f00000000;
+    min.f32 %f2, %f2, 0f3F800000;
+    mul.f32 %f2, %f2, 0f437F0000;
+    cvt.rni.u32.f32 %r7, %f2;
+    max.f32 %f3, %f3, 0f00000000;
+    min.f32 %f3, %f3, 0f3F800000;
+    mul.f32 %f3, %f3, 0f437F0000;
+    cvt.rni.u32.f32 %r8, %f3;
+    max.f32 %f4, %f4, 0f00000000;
+    min.f32 %f4, %f4, 0f3F800000;
+    mul.f32 %f4, %f4, 0f437F0000;
+    cvt.rni.u32.f32 %r9, %f4;
+
+    shl.b32 %r7, %r7, 8;
+    shl.b32 %r8, %r8, 16;
+    shl.b32 %r9, %r9, 24;
+    or.b32 %r10, %r6, %r7;
+    or.b32 %r10, %r10, %r8;
+    or.b32 %r10, %r10, %r9;
+
+    mul.wide.u32 %rd7, %r5, 4;
+    add.s64 %rd8, %rd4, %rd7;
+    st.global.u32 [%rd8], %r10;
+
+DONE:
+    ret;
+}
+)PTX";
+
 struct CudaCtx::Impl {
     CUcontext  context = nullptr;
     CUmodule   module  = nullptr;
     CUfunction kernel  = nullptr;
+    CUmodule   pack_module = nullptr;    // kPackPtx, loaded with the scene module
+    CUfunction pack_kernel = nullptr;
     CUdeviceptr out_buf = 0;     // iw*ih*4 floats
+    CUdeviceptr out8_buf = 0;    // iw*ih u32 (RGBA8), written by the pack kernel
     CUdeviceptr params_buf = 0;
     std::size_t out_floats = 0;
+    std::size_t out8_px = 0;
     std::size_t params_floats = 0;
-    // Pinned readback buffer, grown to the largest tile seen and kept across
-    // frames (see render() for why it is pinned).
-    float*      host_buf    = nullptr;
-    std::size_t host_floats = 0;
+    // Pinned readback buffers, grown to the largest tile seen and kept across
+    // frames (see render() for why they are pinned).
+    float*         host_buf    = nullptr;
+    std::size_t    host_floats = 0;
+    std::uint8_t*  host8_buf   = nullptr;
+    std::size_t    host8_bytes = 0;
 
     ~Impl() {
-        if (context)    cuCtxSetCurrent(context);
-        if (host_buf)   cuMemFreeHost(host_buf);
-        if (out_buf)    cuMemFree_v2(out_buf);
-        if (params_buf) cuMemFree_v2(params_buf);
-        if (module)     cuModuleUnload(module);
-        if (context)    cuCtxDestroy_v2(context);
+        if (context)     cuCtxSetCurrent(context);
+        if (host_buf)    cuMemFreeHost(host_buf);
+        if (host8_buf)   cuMemFreeHost(host8_buf);
+        if (out_buf)     cuMemFree_v2(out_buf);
+        if (out8_buf)    cuMemFree_v2(out8_buf);
+        if (params_buf)  cuMemFree_v2(params_buf);
+        if (pack_module) cuModuleUnload(pack_module);
+        if (module)      cuModuleUnload(module);
+        if (context)     cuCtxDestroy_v2(context);
     }
 };
 
@@ -165,17 +243,19 @@ CudaCtx::create(const std::string& ptx, const std::string& kernel_name) {
     e = cuModuleGetFunction(&I.kernel, I.module, kernel_name.c_str());
     if (e != CUDA_SUCCESS)
         return std::unexpected("cuModuleGetFunction('" + kernel_name + "'): " + cu_err(e));
+
+    e = cuModuleLoadData(&I.pack_module, kPackPtx);
+    if (e != CUDA_SUCCESS) return std::unexpected("cuModuleLoadData(pack): " + cu_err(e));
+    e = cuModuleGetFunction(&I.pack_kernel, I.pack_module, "frep_pack_rgba8");
+    if (e != CUDA_SUCCESS) return std::unexpected("cuModuleGetFunction(pack): " + cu_err(e));
     self->stats_.build_ms = ms_since(t1);
 
     return self;
 }
 
-std::expected<void, std::string>
-CudaCtx::render(const CudaRenderArgs& args,
-                const std::vector<float>& params,
-                std::vector<float>& out_rgba) {
+std::expected<CudaCtx::Rect, std::string>
+CudaCtx::launch(const CudaRenderArgs& args, const std::vector<float>& params) {
     Impl& I = *impl_;
-    auto t0 = clk::now();
     // The CUDA context is created on (and bound to) the thread that called
     // create(). The multi-view render worker spawns a fresh std::thread per
     // frame, so a later render runs on a different thread where this context is
@@ -190,9 +270,11 @@ CudaCtx::render(const CudaRenderArgs& args,
     // The requested tile, clipped to the frame. The kernel addresses a
     // full-frame device buffer in tile coordinates; only this rectangle is
     // read back.
-    const int x0 = std::max(args.tx, 0), y0 = std::max(args.ty, 0);
+    Rect rc;
+    rc.W = W; rc.H = H;
+    rc.x0 = std::max(args.tx, 0); rc.y0 = std::max(args.ty, 0);
     const int x1 = std::min(args.tx + args.tw, W), y1 = std::min(args.ty + args.th, H);
-    const int tw = std::max(x1 - x0, 0), th = std::max(y1 - y0, 0);
+    rc.tw = std::max(x1 - rc.x0, 0); rc.th = std::max(y1 - rc.y0, 0);
 
     const std::size_t out_floats = (std::size_t)W * H * 4;
     CUresult e;
@@ -244,6 +326,20 @@ CudaCtx::render(const CudaRenderArgs& args,
                        0, nullptr, kargs, nullptr);
     if (e != CUDA_SUCCESS) return std::unexpected("cuLaunchKernel: " + cu_err(e));
     stats_.launch_ms = ms_since(t_launch);
+    stats_.width = W; stats_.height = H;
+    return rc;
+}
+
+std::expected<void, std::string>
+CudaCtx::render(const CudaRenderArgs& args,
+                const std::vector<float>& params,
+                std::vector<float>& out_rgba) {
+    Impl& I = *impl_;
+    auto t0 = clk::now();
+    auto rc = launch(args, params);
+    if (!rc) return std::unexpected(rc.error());
+    const int W = rc->W, x0 = rc->x0, y0 = rc->y0, tw = rc->tw, th = rc->th;
+    CUresult e = CUDA_SUCCESS;
 
     // Read the tile back. A synchronous copy on the legacy stream waits for
     // the kernel first, so no cuCtxSynchronize is needed. The destination is
@@ -265,7 +361,7 @@ CudaCtx::render(const CudaRenderArgs& args,
         I.host_floats = tile_floats;
     }
     if (tile_floats > 0) {
-        if (tw == W && th == H) {
+        if (tw == W && th == rc->H) {
             e = cuMemcpyDtoH_v2(I.host_buf, I.out_buf, tile_floats * sizeof(float));
         } else {
             CUDA_MEMCPY2D c{};
@@ -286,7 +382,72 @@ CudaCtx::render(const CudaRenderArgs& args,
     stats_.copy_ms = ms_since(t_copy);
 
     out_rgba.assign(I.host_buf, I.host_buf + tile_floats);
-    stats_.width = W; stats_.height = H;
+    stats_.render_ms = ms_since(t0);
+    return {};
+}
+
+std::expected<void, std::string>
+CudaCtx::render(const CudaRenderArgs& args,
+                const std::vector<float>& params,
+                std::vector<std::uint8_t>& out_rgba8) {
+    Impl& I = *impl_;
+    auto t0 = clk::now();
+    auto rc = launch(args, params);
+    if (!rc) return std::unexpected(rc.error());
+    const int W = rc->W, H = rc->H, x0 = rc->x0, y0 = rc->y0, tw = rc->tw, th = rc->th;
+    CUresult e = CUDA_SUCCESS;
+
+    // Pack the whole frame to RGBA8 on the device (the kernel wrote float4;
+    // the pack is one thread per pixel and runs in the kernel's shadow), then
+    // read back only the tile rectangle, a quarter of the float bytes.
+    auto t_copy = clk::now();
+    const std::size_t px = (std::size_t)W * H;
+    if (!I.out8_buf || I.out8_px != px) {
+        if (I.out8_buf) cuMemFree_v2(I.out8_buf);
+        e = cuMemAlloc_v2(&I.out8_buf, px * 4);
+        if (e != CUDA_SUCCESS) return std::unexpected("cuMemAlloc out8: " + cu_err(e));
+        I.out8_px = px;
+    }
+    {
+        unsigned n = (unsigned)px;
+        void* pargs[] = { &I.out_buf, &I.out8_buf, &n };
+        const unsigned bs = 256;
+        e = cuLaunchKernel(I.pack_kernel, (n + bs - 1) / bs, 1, 1, bs, 1, 1,
+                           0, nullptr, pargs, nullptr);
+        if (e != CUDA_SUCCESS) return std::unexpected("cuLaunchKernel(pack): " + cu_err(e));
+    }
+    const std::size_t tile_bytes = (std::size_t)tw * th * 4;
+    if (tile_bytes > I.host8_bytes) {
+        if (I.host8_buf) cuMemFreeHost(I.host8_buf);
+        I.host8_buf = nullptr; I.host8_bytes = 0;
+        void* p = nullptr;
+        e = cuMemAllocHost_v2(&p, tile_bytes);
+        if (e != CUDA_SUCCESS) return std::unexpected("cuMemAllocHost: " + cu_err(e));
+        I.host8_buf = static_cast<std::uint8_t*>(p);
+        I.host8_bytes = tile_bytes;
+    }
+    if (tile_bytes > 0) {
+        if (tw == W && th == H) {
+            e = cuMemcpyDtoH_v2(I.host8_buf, I.out8_buf, tile_bytes);
+        } else {
+            CUDA_MEMCPY2D c{};
+            c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+            c.srcDevice     = I.out8_buf;
+            c.srcXInBytes   = (std::size_t)x0 * 4;
+            c.srcY          = (std::size_t)y0;
+            c.srcPitch      = (std::size_t)W * 4;
+            c.dstMemoryType = CU_MEMORYTYPE_HOST;
+            c.dstHost       = I.host8_buf;
+            c.dstPitch      = (std::size_t)tw * 4;
+            c.WidthInBytes  = (std::size_t)tw * 4;
+            c.Height        = (std::size_t)th;
+            e = cuMemcpy2D_v2(&c);
+        }
+        if (e != CUDA_SUCCESS) return std::unexpected("readback: " + cu_err(e));
+    }
+    stats_.copy_ms = ms_since(t_copy);
+
+    out_rgba8.assign(I.host8_buf, I.host8_buf + tile_bytes);
     stats_.render_ms = ms_since(t0);
     return {};
 }

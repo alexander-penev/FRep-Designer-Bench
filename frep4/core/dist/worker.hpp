@@ -110,7 +110,8 @@ public:
                 // Debug preview hook (no-op unless a GUI set it).
                 if (cfg_.on_tile) cfg_.on_tile(tile, rr);
 
-                auto payload = encode_tile_result(w, rr.rgba);
+                std::vector<float> scratch;   // the wire format is float
+                auto payload = encode_tile_result(w, rr.floats(scratch));
                 if (auto s = send_msg(t, MsgType::TileResult, payload); !s)
                     return std::unexpected("send result: " + s.error());
                 ++total_rendered;

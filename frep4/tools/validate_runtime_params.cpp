@@ -102,6 +102,7 @@ int main() {
         std::printf("       compile_ms: first=%.2f  after-edit=%.2f  (after-edit should be << first)\n",
                     ra.compile_ms, rb.compile_ms);
 
+        ra.to_float(); rb.to_float(); rc.to_float();
         double d_bc = max_abs_diff(rb.rgba, rc.rgba);
         check(d_bc < 0.02,
               "buffer-path image equals the full-recompile image");

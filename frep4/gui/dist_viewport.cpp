@@ -134,17 +134,18 @@ void DistViewport::start_render() {
             {
                 std::lock_guard<std::mutex> lk(image_mu_);
                 const auto& t = tr.tile;
+                std::vector<float> scratch;
+                const auto& px = tr.floats(scratch);
                 for (int y = t.y0; y < t.y1 && y < image_.height(); ++y) {
                     auto* row = reinterpret_cast<QRgb*>(image_.scanLine(y));
                     for (int x = t.x0; x < t.x1 && x < image_.width(); ++x) {
                         std::size_t p = ((std::size_t)(y - t.y0) * (t.x1 - t.x0)
                                          + (x - t.x0)) * 4;
-                        if (p + 3 >= tr.rgba.size()) continue;
+                        if (p + 3 >= px.size()) continue;
                         auto f = [&](float v) {
                             return (int)std::clamp(v * 255.0f, 0.0f, 255.0f);
                         };
-                        row[x] = qRgba(f(tr.rgba[p]), f(tr.rgba[p+1]),
-                                       f(tr.rgba[p+2]), 255);
+                        row[x] = qRgba(f(px[p]), f(px[p+1]), f(px[p+2]), 255);
                     }
                 }
                 if (worker_id >= 0 && worker_id < (int)per_worker_.size())

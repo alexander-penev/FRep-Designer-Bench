@@ -2221,14 +2221,15 @@ void MainWindow::start_lan_worker() {
                 int tw = t.x1 - t.x0, th = t.y1 - t.y0;
                 if (tw <= 0 || th <= 0) return;
                 QImage tile(tw, th, QImage::Format_ARGB32);
+                std::vector<float> scratch;
+                const auto& px = rr.floats(scratch);
                 for (int y = 0; y < th; ++y) {
                     auto* row = reinterpret_cast<QRgb*>(tile.scanLine(y));
                     for (int x = 0; x < tw; ++x) {
                         std::size_t p = ((std::size_t)y * tw + x) * 4;
-                        if (p + 3 >= rr.rgba.size()) { row[x] = qRgba(0,0,0,255); continue; }
+                        if (p + 3 >= px.size()) { row[x] = qRgba(0,0,0,255); continue; }
                         auto f = [&](float v){ return (int)std::clamp(v*255.f,0.f,255.f); };
-                        row[x] = qRgba(f(rr.rgba[p]), f(rr.rgba[p+1]),
-                                       f(rr.rgba[p+2]), 255);
+                        row[x] = qRgba(f(px[p]), f(px[p+1]), f(px[p+2]), 255);
                     }
                 }
                 // Marshal onto the GUI thread: append a thumbnail labelled with

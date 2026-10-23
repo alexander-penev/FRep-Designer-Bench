@@ -44,6 +44,11 @@ int main(int argc, char** argv) {
     // shape that was hit.
     bool no_shadows = false, no_ao = false;
     int shadow_samples = -1;
+    // Payload to request from both paths. The default, float, compares the
+    // paths' arithmetic; --format rgba8 compares what the GPU paths hand back
+    // by default (and the CPU path quantised the same way), which checks the
+    // device-side packing itself.
+    auto fmt = TracerConfig::OutputFormat::Float;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](const char* d) { return i + 1 < argc ? argv[++i] : d; };
@@ -53,6 +58,11 @@ int main(int argc, char** argv) {
         else if (a == "--no-shadows")  no_shadows = true;
         else if (a == "--no-ao")       no_ao = true;
         else if (a == "--shadow-samples") shadow_samples = std::atoi(next("1"));
+        else if (a == "--format") {
+            std::string f = next("float");
+            fmt = f == "rgba8" ? TracerConfig::OutputFormat::RGBA8
+                               : TracerConfig::OutputFormat::Float;
+        }
     }
     auto comma = paths.find(',');
     if (comma == std::string::npos) {
@@ -72,6 +82,7 @@ int main(int argc, char** argv) {
     if (no_shadows) cfg.enable_shadows = false;
     if (no_ao)      cfg.enable_ao = false;
     if (shadow_samples > 0) cfg.shadow_samples = shadow_samples;
+    cfg.output_format = fmt;
     auto ea = make_executor(pa, cfg), eb = make_executor(pb, cfg);
     if (!ea || !eb) { std::fprintf(stderr, "unknown path in '%s'\n", paths.c_str()); return 1; }
     if (!ea->available()) { std::fprintf(stderr, "%s unavailable\n", pa.c_str()); return 1; }
@@ -82,6 +93,7 @@ int main(int argc, char** argv) {
     TileResult rb = eb->render(scene, R, R, full);
     if (!ra.ok) { std::fprintf(stderr, "%s: %s\n", pa.c_str(), ra.error.c_str()); return 1; }
     if (!rb.ok) { std::fprintf(stderr, "%s: %s\n", pb.c_str(), rb.error.c_str()); return 1; }
+    ra.to_float(); rb.to_float();   // compare as floats whatever was requested
 
     std::size_t n = std::min(ra.rgba.size(), rb.rgba.size());
     if (n == 0) { std::fprintf(stderr, "empty frame\n"); return 1; }

@@ -36,6 +36,16 @@ struct TracerConfig {
     float fd_eps        = 0.001f;   // finite-diff epsilon for the normal
     float safety_factor = 0.85f;    // reduced step for non-true SDF (CSG)
 
+    // ── Pixel payload ───────────────────────────────────────────────────────
+    // What an executor hands back in TileResult (exec::PixelFormat). Auto is
+    // what each path produces fastest: RGBA8 on the GPU paths, whose frame
+    // leaves the device as 8 bits per channel (widening it to float was
+    // 0.4 ms of a 0.55 ms frame at 512²), and Float on the CPU path, which
+    // computes floats and would pay to quantise. A comparison that must see
+    // the paths' arithmetic rather than a 1/255 quantisation asks for Float.
+    enum class OutputFormat { Auto, Float, RGBA8 };
+    OutputFormat output_format = OutputFormat::Auto;
+
     // ── GPU workgroup tile cull ─────────────────────────────────────────────
     // Before marching, each 8x8 workgroup bounds its own frustum slab stack and
     // discards the depth slabs that provably hold no surface, using the SDF's

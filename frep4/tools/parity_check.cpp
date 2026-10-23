@@ -206,6 +206,7 @@ int main(int argc, char** argv) {
             }
             continue;
         }
+        ra.to_float(); rb.to_float();
         auto a_img = downsample(std::move(ra.rgba));
         auto b_img = downsample(std::move(rb.rgba));
         // Optionally write both paths' frames as PPM for offline pixel

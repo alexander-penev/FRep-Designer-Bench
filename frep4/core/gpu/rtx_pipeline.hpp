@@ -42,7 +42,8 @@ struct RtPushConstants {
 };
 
 struct RtRenderResult {
-    std::vector<float> rgba;  // width*height*4, row-major top-down
+    std::vector<float>        rgba;   // width*height*4, row-major top-down (float request)
+    std::vector<std::uint8_t> rgba8;  // the same frame as the rgba8 the image holds (rgba8 request)
     int width  = 0;
     int height = 0;
 
@@ -53,6 +54,7 @@ struct RtRenderResult {
     double pipeline_ms = 0.0;  // shader modules + RT pipeline + SBT build
     double trace_ms    = 0.0;  // vkCmdTraceRaysKHR submit→fence (the real work)
     double readback_ms = 0.0;  // image → host buffer copy + map
+    double readback_alloc_ms = 0.0;  // of which: sizing the result vector
 };
 
 // Build the pipeline once per (shader set) and render. We keep it
@@ -124,6 +126,17 @@ struct RtxPipelineCache {
     std::uint32_t handle_size = 0;          // aligned group handle size
     std::uint64_t key = 0;                  // shader-set hash this cache is valid for
     bool          valid = false;
+    // Identity (data pointer, length) of every blob `key` was hashed from. A
+    // frame whose blobs are the same objects reuses `key` without rehashing:
+    // the FNV over ~200 KB of SPIR-V was 0.03 ms of every frame. release()
+    // clears it, and the executor releases on every shader rebuild, so a
+    // vector refilled in place with new shaders cannot be mistaken for the
+    // old ones.
+    std::vector<std::pair<const void*, std::size_t>> key_src;
+    // Device SBT alignments, read once at build time instead of through a
+    // vkGetPhysicalDeviceProperties2 on every frame.
+    std::uint32_t sbt_base_align = 0;
+    std::uint32_t sbt_handle_align = 0;
 
     // Per-frame render target, reused across frames while (w,h) are unchanged.
     // The rgba32f storage image and its readback buffer are two ~W*H*16-byte
@@ -171,7 +184,8 @@ rtx_trace_cached(const RtxCtx& ctx, const RtAccel& accel,
                  const std::vector<std::uint32_t>& rmiss,
                  const RtPushConstants& pc, int width, int height,
                  const std::vector<std::uint32_t>& texture_pixels = {},
-                 const std::vector<float>& mesh_voxels = {});
+                 const std::vector<float>& mesh_voxels = {},
+                 bool want_rgba8 = false);
 
 // Cached variant of rtx_trace_groups: reuses the multi-BLAS pipeline + SBT +
 // shader modules from `cache` while the group shader set is unchanged (only the
@@ -185,6 +199,7 @@ rtx_trace_groups_cached(const RtxCtx& ctx, const RtAccel& accel,
                         const std::vector<std::vector<std::uint32_t>>& rchit_per_group,
                         const std::vector<std::uint32_t>& rmiss,
                         const std::vector<std::uint32_t>& rmiss_shadow,
-                        const RtPushConstants& pc, int width, int height);
+                        const RtPushConstants& pc, int width, int height,
+                        bool want_rgba8 = false);
 
 }  // namespace frep::gpu

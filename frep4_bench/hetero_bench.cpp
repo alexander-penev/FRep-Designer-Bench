@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
         // Warm both executors: pays JIT / shader+pipeline setup once, exactly
         // like the steady-state policy of every other table.
         TileResult ref = cpu->render(scene, R, R, full);
+        ref.to_float();
         TileResult gw  = gpu->render(scene, R, R, full);
         if (!ref.ok || !gw.ok) {
             std::fprintf(stderr, "  %-16s warmup failed: %s\n", name.c_str(),

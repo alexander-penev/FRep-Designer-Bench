@@ -70,10 +70,20 @@ int main(int argc, char** argv) {
     // "geometry" turns them off so the work per pixel is what the other systems
     // actually do; "full" is the default the interactive app ships with.
     bool geometry_only = false;
+    // Pixel payload the executors hand back: auto (each path's fastest —
+    // RGBA8 on the GPU paths, float on the CPU), float, or rgba8 for every
+    // path. --format float against the default is the readback A/B.
+    auto out_fmt = TracerConfig::OutputFormat::Auto;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--energy" && i + 1 < argc) energy_s = std::atof(argv[++i]);
         else if (a == "--geometry") geometry_only = true;
+        else if (a == "--format" && i + 1 < argc) {
+            std::string f = argv[++i];
+            out_fmt = f == "float" ? TracerConfig::OutputFormat::Float
+                    : f == "rgba8" ? TracerConfig::OutputFormat::RGBA8
+                    :                TracerConfig::OutputFormat::Auto;
+        }
     }
 
     std::string scene_name = path;
@@ -131,9 +141,11 @@ int main(int argc, char** argv) {
                                PathKind::GpuIr, PathKind::GpuRtx };
     const int WARM = 3, ITERS = 15;
 
-    std::printf("scene %s   %dx%d   shading=%s   (ms)\n", path.c_str(), R, R,
+    std::printf("scene %s   %dx%d   shading=%s   payload=%s   (ms)\n", path.c_str(), R, R,
                 geometry_only ? "geometry (depth+normal, matches libfive/mpr)"
-                              : "full (shadows+AO+specular)");
+                              : "full (shadows+AO+specular)",
+                out_fmt == TracerConfig::OutputFormat::Float ? "float"
+                : out_fmt == TracerConfig::OutputFormat::RGBA8 ? "rgba8" : "auto");
     std::printf("%-9s | %10s | %10s | %10s | %9s | %7s %7s\n",
                 "path", "build", "run", "wall", "run ns/ray", "mJ/f", "mJ/f");
     std::printf("          |            |            |            |           |"
@@ -149,6 +161,7 @@ int main(int argc, char** argv) {
             cfg.enable_ao       = false;
             cfg.enable_specular = false;
         }
+        cfg.output_format = out_fmt;
         auto exec = make_executor(pk, cfg);
         if (!exec || !exec->available()) {
             std::printf("%-9s | %10s\n", name, "unavailable");

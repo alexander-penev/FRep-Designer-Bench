@@ -307,10 +307,13 @@ void ExecutorViewport::start_render() {
 }
 
 namespace {
-// Convert an executor's float-RGBA tile into the destination QImage region.
+// Convert an executor's tile into the destination QImage region. The GPU
+// paths hand back RGBA8, which goes straight into the pixels; a float tile
+// (the CPU path) is quantised here.
 void blit_tile(QImage& dst, const exec::TileResult& r) {
     const auto& t = r.tile;
     int tw = t.width(), th = t.height();
+    const bool bytes = r.format == exec::PixelFormat::RGBA8;
     for (int y = 0; y < th; ++y) {
         int dy = t.y0 + y;
         if (dy < 0 || dy >= dst.height()) continue;
@@ -318,12 +321,18 @@ void blit_tile(QImage& dst, const exec::TileResult& r) {
         for (int x = 0; x < tw; ++x) {
             int dx = t.x0 + x;
             if (dx < 0 || dx >= dst.width()) continue;
-            const float* px = &r.rgba[(std::size_t)(y * tw + x) * 4];
-            auto clamp8 = [](float v) {
-                int i = (int)(v * 255.0f + 0.5f);
-                return (unsigned char)std::clamp(i, 0, 255);
-            };
-            row[dx] = qRgb(clamp8(px[0]), clamp8(px[1]), clamp8(px[2]));
+            const std::size_t i = (std::size_t)(y * tw + x) * 4;
+            if (bytes) {
+                const std::uint8_t* px = &r.rgba8[i];
+                row[dx] = qRgb(px[0], px[1], px[2]);
+            } else {
+                const float* px = &r.rgba[i];
+                auto clamp8 = [](float v) {
+                    int k = (int)(v * 255.0f + 0.5f);
+                    return (unsigned char)std::clamp(k, 0, 255);
+                };
+                row[dx] = qRgb(clamp8(px[0]), clamp8(px[1]), clamp8(px[2]));
+            }
         }
     }
 }

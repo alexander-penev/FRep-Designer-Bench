@@ -68,6 +68,16 @@ public:
            const std::vector<float>& params,
            std::vector<float>& out_rgba);
 
+    // Same tile as RGBA8, packed on the device by a small second kernel
+    // (clamp, scale by 255, round) so a quarter of the bytes cross the bus
+    // and nothing on the host widens them. The default payload of the GPU-IR
+    // executor; the float variant is for callers that need the kernel's
+    // unquantised values.
+    std::expected<void, std::string>
+    render(const CudaRenderArgs& args,
+           const std::vector<float>& params,
+           std::vector<std::uint8_t>& out_rgba8);
+
     const CudaRenderStats& stats() const { return stats_; }
 
     // True if the CUDA driver initialises and at least one device exists.
@@ -76,6 +86,10 @@ public:
 private:
     CudaCtx() = default;
     struct Impl;
+    struct Rect { int x0 = 0, y0 = 0, tw = 0, th = 0, W = 0, H = 0; };
+    // Shared front half of both render() variants: buffers, params, launch.
+    std::expected<Rect, std::string>
+    launch(const CudaRenderArgs& args, const std::vector<float>& params);
     std::unique_ptr<Impl> impl_;
     CudaRenderStats stats_;
 };

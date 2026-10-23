@@ -260,13 +260,16 @@ public:
         // 6. Trace full frame. Both paths reuse the cached pipeline + SBT via
         //    cache_ (warm → pipeline_ms ≈ 0, only trace + readback recur), so an
         //    interactive camera move pays only the trace.
+        //    The frame comes back as the rgba8 the image holds unless the
+        //    caller asked for floats (TracerConfig::output_format).
+        const bool want8 = cfg_.output_format != TracerConfig::OutputFormat::Float;
         auto img = group_mode_
             ? gpu::rtx_trace_groups_cached(*ctx_, *accel_, cache_,
                                            rgen_, rints_group_, rchits_group_,
-                                           rmiss_, rmiss_shadow_, pc, W, H)
+                                           rmiss_, rmiss_shadow_, pc, W, H, want8)
             : gpu::rtx_trace_cached(*ctx_, *accel_, cache_,
                                     rgen_, rint_, rchit_, rmiss_,
-                                    pc, W, H, tex_pixels_, mesh_voxels_);
+                                    pc, W, H, tex_pixels_, mesh_voxels_, want8);
         if (!img) { r.error = "gpu_rtx: " + img.error(); return r; }
         auto pt_trace = pclk::now();
 
@@ -274,18 +277,21 @@ public:
         //    tile covers the whole frame — the common case — move the buffer
         //    instead of copying it (a 512² frame is a 4 MB memcpy otherwise, ~1 ms).
         int tw = tile.x1 - tile.x0, th = tile.y1 - tile.y0;
-        if (tile.x0 == 0 && tile.y0 == 0 && tw == W && th == H) {
-            r.rgba = std::move(img->rgba);
-        } else {
-            r.rgba.resize((std::size_t)tw * th * 4);
-            for (int y = 0; y < th; ++y)
-                for (int x = 0; x < tw; ++x) {
-                    int sx = tile.x0 + x, sy = tile.y0 + y;
-                    const float* s = &img->rgba[((std::size_t)sy * W + sx) * 4];
-                    float* d = &r.rgba[((std::size_t)y * tw + x) * 4];
-                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
-                }
-        }
+        r.format = want8 ? PixelFormat::RGBA8 : PixelFormat::Float;
+        auto crop = [&](auto& dst, auto& src) {
+            if (tile.x0 == 0 && tile.y0 == 0 && tw == W && th == H) {
+                dst = std::move(src);
+                return;
+            }
+            dst.resize((std::size_t)tw * th * 4);
+            for (int y = 0; y < th; ++y) {
+                int sy = tile.y0 + y;
+                std::memcpy(&dst[(std::size_t)y * tw * 4],
+                            &src[((std::size_t)sy * W + tile.x0) * 4],
+                            (std::size_t)tw * 4 * sizeof(dst[0]));
+            }
+        };
+        if (want8) crop(r.rgba8, img->rgba8); else crop(r.rgba, img->rgba);
         // Setup (pipeline + SBT) is amortizable across frames; only trace is the
         // recurring per-frame GPU cost. Expose both so the paper can separate
         // them rather than reporting one conflated number.
@@ -307,11 +313,11 @@ public:
             std::fprintf(stderr,
                 "[rtx-prof %s] wall=%.2f  rebuild=%.2f  trace_call=%.2f  crop=%.2f"
                 "   | inside trace: setup(pipeline_ms)=%.2f trace(trace_ms)=%.2f "
-                "readback=%.2f\n",
+                "readback=%.2f (alloc %.2f)\n",
                 mode,
                 d(pt0, pt_crop), d(pt0, pt_rebuild), d(pt_rebuild, pt_trace),
                 d(pt_trace, pt_crop),
-                img->pipeline_ms, img->trace_ms, img->readback_ms);
+                img->pipeline_ms, img->trace_ms, img->readback_ms, img->readback_alloc_ms);
         }
         return r;
     }

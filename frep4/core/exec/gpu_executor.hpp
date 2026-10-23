@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <expected>
 #include <memory>
 #include <string>
 #include <vector>
@@ -133,11 +134,14 @@ public:
         push.tile_x0 = tile.x0; push.tile_y0 = tile.y0;
         push.tile_x1 = tile.x1; push.tile_y1 = tile.y1;
 
-        // The context reads back exactly the tile (tightly packed) and converts
-        // it to float straight out of the mapped staging buffer — one pass over
-        // the frame instead of a byte copy, a zero-fill and a divide loop.
+        // The context reads back exactly the tile (tightly packed): as the
+        // RGBA8 the shader wrote (the default — a 1 MB memcpy at 512²), or
+        // widened to float in one pass when the caller asked for floats.
+        const bool want8 = cfg_.output_format != TracerConfig::OutputFormat::Float;
         auto t_r = clk::now();
-        auto rr = ctx_->render(push, r.rgba);
+        std::expected<void, std::string> rr;
+        if (want8) { r.format = PixelFormat::RGBA8; rr = ctx_->render(push, r.rgba8); }
+        else       { r.format = PixelFormat::Float; rr = ctx_->render(push, r.rgba); }
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
         if (!rr) { r.error = "gpu render failed"; return r; }
 

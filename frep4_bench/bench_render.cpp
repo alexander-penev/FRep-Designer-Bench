@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
             Tile full{0, 0, R, R};
 
             TileResult first = exec->render(scene, R, R, full);
+            first.to_float();   // the checks below read floats
             if (!first.ok) {
                 std::fprintf(stderr, "  %-8s %-16s render error: %s\n",
                              backend, name.c_str(), first.error.c_str());

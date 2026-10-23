@@ -169,14 +169,19 @@ public:
         }
         args.fov_scale = view_scale;
 
-        // The context returns the tile's floats directly: no full-frame copy,
-        // no clamp to RGBA8 and back. That round trip quantised every GPU-IR
-        // pixel to 1/255 and cost two passes over the frame per frame.
+        // The context returns the tile directly, no full-frame copy: packed to
+        // RGBA8 on the device (the default — a quarter of the bytes cross the
+        // bus and no host pass widens them), or as the kernel's floats when
+        // the caller asked for floats.
+        const bool want8 = cfg_.output_format != TracerConfig::OutputFormat::Float;
         auto t_r = clk::now();
-        auto rr = cuda_ctx_->render(args, cached_params_, r.rgba);
+        std::expected<void, std::string> rr;
+        if (want8) { r.format = PixelFormat::RGBA8; rr = cuda_ctx_->render(args, cached_params_, r.rgba8); }
+        else       { r.format = PixelFormat::Float; rr = cuda_ctx_->render(args, cached_params_, r.rgba); }
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
         if (!rr) { r.error = "cuda render: " + rr.error(); return r; }
-        pad_clipped_tile(r.rgba, tile, W, H);
+        if (want8) pad_clipped_tile(r.rgba8, tile, W, H);
+        else       pad_clipped_tile(r.rgba, tile, W, H);
         r.threads_used = 0;
         r.ok = true;
 
@@ -202,18 +207,19 @@ private:
     // CudaCtx returns the tile clipped to the frame. The scheduler never asks
     // for a tile that reaches outside it, but the interface allows one; pad it
     // with zeros so the result has the tile's own size.
-    static void pad_clipped_tile(std::vector<float>& rgba, const Tile& tile, int W, int H) {
+    template <class T>
+    static void pad_clipped_tile(std::vector<T>& px, const Tile& tile, int W, int H) {
         const int x0 = std::max(tile.x0, 0), y0 = std::max(tile.y0, 0);
         const int x1 = std::min(tile.x1, W), y1 = std::min(tile.y1, H);
         const int cw = std::max(x1 - x0, 0), ch = std::max(y1 - y0, 0);
         const int tw = tile.width(), th = tile.height();
         if (cw == tw && ch == th) return;
-        std::vector<float> full((std::size_t)tw * th * 4, 0.0f);
+        std::vector<T> full((std::size_t)tw * th * 4, T{});
         for (int y = 0; y < ch; ++y)
             std::memcpy(&full[(((std::size_t)(y0 - tile.y0 + y)) * tw + (x0 - tile.x0)) * 4],
-                        &rgba[(std::size_t)y * cw * 4],
-                        (std::size_t)cw * 4 * sizeof(float));
-        rgba.swap(full);
+                        &px[(std::size_t)y * cw * 4],
+                        (std::size_t)cw * 4 * sizeof(T));
+        px.swap(full);
     }
 
     SceneCodegen::SceneSdfMode mode_;

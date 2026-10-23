@@ -371,20 +371,13 @@ bool Viewport::render_gpu_cuda(int hi_w, int hi_h, std::size_t scene_hash,
     }
     args.fov_scale = view_scale;
 
-    // The context hands back the kernel's floats; the viewport's framebuffer is
-    // RGBA8, so quantise here, once, instead of inside the context for every
-    // caller (the executors want the floats).
-    std::vector<float> fpx;
-    auto rr = cuda_ctx_->render(args, params, fpx);
+    // The viewport's framebuffer is RGBA8, and the context packs the frame to
+    // RGBA8 on the device, so what comes back goes straight in.
+    auto rr = cuda_ctx_->render(args, params, rgba);
     if (!rr) {
         gpu_status_ = QString("CUDA render: %1")
             .arg(QString::fromStdString(rr.error()));
         return false;
-    }
-    rgba.resize(fpx.size());
-    for (std::size_t i = 0; i < fpx.size(); ++i) {
-        float v = std::clamp(fpx[i], 0.0f, 1.0f);
-        rgba[i] = static_cast<std::uint8_t>(v * 255.0f + 0.5f);
     }
     return true;
 }

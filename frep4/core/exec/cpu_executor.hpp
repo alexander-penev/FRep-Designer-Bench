@@ -156,6 +156,9 @@ public:
 
         r.peak_rss_kb = peak_rss_kb();
         r.ok = true;
+        // The CPU path computes floats; Auto keeps them. A caller that wants
+        // the GPU paths' payload for every path pays one quantising pass here.
+        if (cfg_.output_format == TracerConfig::OutputFormat::RGBA8) r.to_rgba8();
         return r;
     }
 

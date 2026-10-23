@@ -309,6 +309,7 @@ void RtxPipelineCache::release(const RtxCtx& ctx) {
     pipeline = pipeline_layout = descriptor_layout = nullptr;
     sbt_buffer = sbt_memory = nullptr;
     sbt_base = 0; handle_size = 0; key = 0; valid = false;
+    key_src.clear(); sbt_base_align = sbt_handle_align = 0;
 }
 
 // Shared implementation. `cache` is optional: when non-null, the pipeline +
@@ -324,7 +325,7 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
                const std::vector<std::uint32_t>& rmiss,
                const RtPushConstants& pc, int width, int height,
                const std::vector<std::uint32_t>& texture_pixels,
-               const std::vector<float>& mesh_voxels) {
+               const std::vector<float>& mesh_voxels, bool want_rgba8) {
     auto dev = ctx.device();
     const bool has_tex  = !texture_pixels.empty();
     const bool has_mesh = !mesh_voxels.empty();
@@ -340,8 +341,14 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     // Build and per-frame work share a clean boundary: the descriptor pool/set
     // (bound to the TLAS + output image) is rebuilt each frame regardless, so
     // the cached objects (pipeline, layouts, modules, SBT) are independent.
+    const std::vector<std::pair<const void*, std::size_t>> key_src = {
+        {rgen.data(), rgen.size()}, {rint.data(), rint.size()},
+        {rchit.data(), rchit.size()}, {rmiss.data(), rmiss.size()},
+        {nullptr, (has_tex ? 2u : 0u) | (has_mesh ? 1u : 0u)}};
     const std::uint64_t want_key =
-        shader_set_key(rgen, rint, rchit, rmiss, has_tex, has_mesh);
+        (cache && cache->valid && cache->key_src == key_src)
+            ? cache->key   // same blobs as the frame before: no rehash
+            : shader_set_key(rgen, rint, rchit, rmiss, has_tex, has_mesh);
     const bool cache_hit = cache && cache->valid && cache->key == want_key;
     if (cache && cache->valid && cache->key != want_key)
         cache->release(ctx);  // different shaders → drop the stale build
@@ -378,15 +385,9 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
         sbt_buf_handle = (VkBuffer)cache->sbt_buffer;
         sbt_base  = cache->sbt_base;
         handle_size = cache->handle_size;
-        // region == base-aligned stride; recompute from device props (cheap).
-        VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtp{};
-        rtp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
-        VkPhysicalDeviceProperties2 p2{};
-        p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; p2.pNext = &rtp;
-        vkGetPhysicalDeviceProperties2(ctx.physical_device(), &p2);
-        VkDeviceSize stride = align_up(rtp.shaderGroupHandleSize,
-                                       rtp.shaderGroupHandleAlignment);
-        region = align_up(stride, rtp.shaderGroupBaseAlignment);
+        // region == base-aligned stride, from the alignments stored at build.
+        VkDeviceSize stride = align_up(handle_size, cache->sbt_handle_align);
+        region = align_up(stride, cache->sbt_base_align);
     } else {
 
     // ── Shader modules ──────────────────────────────────────────────────────
@@ -529,7 +530,10 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
         cache->sbt_memory        = sbt_built->mem;
         cache->sbt_base          = sbt_base;
         cache->handle_size       = handle_size;
+        cache->sbt_base_align    = base_align;
+        cache->sbt_handle_align  = handle_align;
         cache->key               = want_key;
+        cache->key_src           = key_src;
         cache->valid             = true;
     }
     }  // end of cache-miss build branch
@@ -749,15 +753,21 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     // ── Readback ────────────────────────────────────────────────────────────
     RtRenderResult out;
     out.width = width; out.height = height;
-    out.rgba.resize((std::size_t)width * height * 4);
     auto t_rb0 = clk::now();
     {
         // Cached frames keep their readback buffer mapped; the per-frame
-        // (texture/mesh) path still maps and unmaps its own.
+        // (texture/mesh) path still maps and unmaps its own. The frame is
+        // handed over as the rgba8 the image holds, or widened to float.
         void* p = frt->mapped;
         const bool transient = (p == nullptr);
         if (transient) vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
-        unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
+        auto t_alloc0 = clk::now();
+        if (want_rgba8) out.rgba8.resize((std::size_t)img_bytes);
+        else            out.rgba.resize((std::size_t)width * height * 4);
+        out.readback_alloc_ms =
+            std::chrono::duration<double, std::milli>(clk::now() - t_alloc0).count();
+        if (want_rgba8) std::memcpy(out.rgba8.data(), p, (std::size_t)img_bytes);
+        else unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
         if (transient) vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();
@@ -811,7 +821,7 @@ rtx_trace(const RtxCtx& ctx, const RtAccel& accel,
           const std::vector<std::uint32_t>& texture_pixels,
           const std::vector<float>& mesh_voxels) {
     return rtx_trace_impl(ctx, accel, nullptr, rgen, rint, rchit, rmiss,
-                          pc, width, height, texture_pixels, mesh_voxels);
+                          pc, width, height, texture_pixels, mesh_voxels, false);
 }
 
 std::expected<RtRenderResult, std::string>
@@ -823,9 +833,9 @@ rtx_trace_cached(const RtxCtx& ctx, const RtAccel& accel,
                  const std::vector<std::uint32_t>& rmiss,
                  const RtPushConstants& pc, int width, int height,
                  const std::vector<std::uint32_t>& texture_pixels,
-                 const std::vector<float>& mesh_voxels) {
+                 const std::vector<float>& mesh_voxels, bool want_rgba8) {
     return rtx_trace_impl(ctx, accel, &cache, rgen, rint, rchit, rmiss,
-                          pc, width, height, texture_pixels, mesh_voxels);
+                          pc, width, height, texture_pixels, mesh_voxels, want_rgba8);
 }
 
 static std::expected<RtRenderResult, std::string>
@@ -836,7 +846,8 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
                  const std::vector<std::vector<std::uint32_t>>& rchit_per_group,
                  const std::vector<std::uint32_t>& rmiss,
                  const std::vector<std::uint32_t>& rmiss_shadow,
-                 const RtPushConstants& pc, int width, int height) {
+                 const RtPushConstants& pc, int width, int height,
+                 bool want_rgba8) {
     auto dev = ctx.device();
     using clk = std::chrono::steady_clock;
     auto msf = [](clk::time_point a, clk::time_point b) {
@@ -854,8 +865,19 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     auto cmd_trace = api_cast<PFN_vkCmdTraceRaysKHR>(ctx.api().cmdTraceRays);
 
     // Cache key over the whole group shader set (rgen, rchit, rmiss + all rints).
+    // Same blobs as the frame before (by identity) → the stored key, no rehash.
+    std::vector<std::pair<const void*, std::size_t>> key_src;
+    key_src.reserve(4 + rint_per_group.size() + rchit_per_group.size());
+    key_src.emplace_back(rgen.data(), rgen.size());
+    key_src.emplace_back(rmiss.data(), rmiss.size());
+    key_src.emplace_back(rmiss_shadow.data(), rmiss_shadow.size());
+    key_src.emplace_back(nullptr, (std::size_t)ng);
+    for (const auto& ri : rint_per_group) key_src.emplace_back(ri.data(), ri.size());
+    for (const auto& rc : rchit_per_group) key_src.emplace_back(rc.data(), rc.size());
     std::uint64_t want_key = 1469598103934665603ull;
-    {
+    if (cache && cache->valid && cache->key_src == key_src) {
+        want_key = cache->key;
+    } else {
         auto mix = [&](const std::vector<std::uint32_t>& v) {
             want_key ^= v.size(); want_key *= 1099511628211ull;
             for (std::uint32_t w : v) { want_key ^= w; want_key *= 1099511628211ull; }
@@ -869,16 +891,22 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
     const bool cache_hit = cache && cache->valid && cache->key == want_key;
     if (cache && cache->valid && cache->key != want_key) cache->release(ctx);
 
-    // Device SBT alignment props — both the hit and miss branches need them to
-    // compute the region layout.
-    VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtprops{};
-    rtprops.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
-    VkPhysicalDeviceProperties2 props2{};
-    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    props2.pNext = &rtprops;
-    vkGetPhysicalDeviceProperties2(ctx.physical_device(), &props2);
-    const std::uint32_t balign = rtprops.shaderGroupBaseAlignment;
-    const std::uint32_t halign = rtprops.shaderGroupHandleAlignment;
+    // Device SBT alignment props: read once at build time and kept in the
+    // cache; a hit takes them from there instead of querying the device.
+    std::uint32_t balign = 0, halign = 0;
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtprops{};   // filled on a build
+    if (cache_hit) {
+        balign = cache->sbt_base_align;
+        halign = cache->sbt_handle_align;
+    } else {
+        rtprops.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &rtprops;
+        vkGetPhysicalDeviceProperties2(ctx.physical_device(), &props2);
+        balign = rtprops.shaderGroupBaseAlignment;
+        halign = rtprops.shaderGroupHandleAlignment;
+    }
 
     // Objects shared between cache hit and fresh build.
     // One closest-hit module per hit group on the instanced path (each emitted
@@ -1061,7 +1089,10 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
         cache->sbt_memory  = sbt_built->mem;
         cache->sbt_base    = base;
         cache->handle_size = hsize;
+        cache->sbt_base_align   = balign;
+        cache->sbt_handle_align = halign;
         cache->key         = want_key;
+        cache->key_src     = key_src;
         cache->valid       = true;
     }
     }  // end fresh-build (cache-miss) branch
@@ -1211,15 +1242,21 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
 
     RtRenderResult out;
     out.width = width; out.height = height;
-    out.rgba.resize((std::size_t)width * height * 4);
     auto t_rb0 = clk::now();
     {
         // Cached frames keep their readback buffer mapped; the per-frame
-        // (texture/mesh) path still maps and unmaps its own.
+        // (texture/mesh) path still maps and unmaps its own. The frame is
+        // handed over as the rgba8 the image holds, or widened to float.
         void* p = frt->mapped;
         const bool transient = (p == nullptr);
         if (transient) vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
-        unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
+        auto t_alloc0 = clk::now();
+        if (want_rgba8) out.rgba8.resize((std::size_t)img_bytes);
+        else            out.rgba.resize((std::size_t)width * height * 4);
+        out.readback_alloc_ms =
+            std::chrono::duration<double, std::milli>(clk::now() - t_alloc0).count();
+        if (want_rgba8) std::memcpy(out.rgba8.data(), p, (std::size_t)img_bytes);
+        else unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
         if (transient) vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();
@@ -1266,7 +1303,7 @@ rtx_trace_groups(const RtxCtx& ctx, const RtAccel& accel,
                  const RtPushConstants& pc, int width, int height) {
     return rtx_trace_groups_impl(ctx, accel, nullptr, rgen, rint_per_group,
                                  rchit_per_group, rmiss, rmiss_shadow,
-                                 pc, width, height);
+                                 pc, width, height, false);
 }
 
 std::expected<RtRenderResult, std::string>
@@ -1277,10 +1314,11 @@ rtx_trace_groups_cached(const RtxCtx& ctx, const RtAccel& accel,
                         const std::vector<std::vector<std::uint32_t>>& rchit_per_group,
                         const std::vector<std::uint32_t>& rmiss,
                         const std::vector<std::uint32_t>& rmiss_shadow,
-                        const RtPushConstants& pc, int width, int height) {
+                        const RtPushConstants& pc, int width, int height,
+                        bool want_rgba8) {
     return rtx_trace_groups_impl(ctx, accel, &cache, rgen, rint_per_group,
                                  rchit_per_group, rmiss, rmiss_shadow,
-                                 pc, width, height);
+                                 pc, width, height, want_rgba8);
 }
 
 }  // namespace frep::gpu

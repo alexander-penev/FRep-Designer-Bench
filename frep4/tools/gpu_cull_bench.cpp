@@ -81,7 +81,7 @@ static double bench(GpuGlslExecutor& ex, const SceneGraph& s, int R, int frames,
         auto r = ex.render(s, R, R, full);
         if (!r.ok) { err = r.error; return -1; }
         t.push_back(r.render_ms);
-        if (i == frames - 1) last_rgba = std::move(r.rgba);
+        if (i == frames - 1) { r.to_float(); last_rgba = std::move(r.rgba); }
     }
     std::sort(t.begin(), t.end());
     return t[t.size() / 2];
@@ -107,7 +107,7 @@ static bool bench_ab(GpuGlslExecutor& off, GpuGlslExecutor& on,
         to.push_back(ro.render_ms);
         tn.push_back(rn.render_ms);
         tr.push_back(ro.render_ms / rn.render_ms);
-        if (i == frames - 1) { img_off = std::move(ro.rgba); img_on = std::move(rn.rgba); }
+        if (i == frames - 1) { ro.to_float(); rn.to_float(); img_off = std::move(ro.rgba); img_on = std::move(rn.rgba); }
     }
     std::sort(to.begin(), to.end()); std::sort(tn.begin(), tn.end()); std::sort(tr.begin(), tr.end());
     m_off = to[to.size()/2]; m_on = tn[tn.size()/2]; m_ratio = tr[tr.size()/2];

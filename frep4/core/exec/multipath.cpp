@@ -113,17 +113,20 @@ std::vector<Job> AllPathsPerTile::dispatch(
 
 namespace {
 
-// Blit a tile's pixels into a full-frame image buffer.
+// Blit a tile's pixels into a full-frame float image buffer, whatever
+// payload the tile carries (an RGBA8 tile is widened on the way in).
 void blit(std::vector<float>& img, int W, int H, const TileResult& r) {
     const Tile& t = r.tile;
     int tw = t.width();
+    std::vector<float> scratch;
+    const std::vector<float>& px = r.floats(scratch);
     // Fast path: tile fully inside the frame → row-wise memcpy. The scalar
     // per-pixel loop below is only for tiles that overhang the frame.
     if (t.x0 >= 0 && t.y0 >= 0 && t.x1 <= W && t.y1 <= H &&
-        r.rgba.size() >= (std::size_t)tw * t.height() * 4) {
+        px.size() >= (std::size_t)tw * t.height() * 4) {
         for (int y = t.y0; y < t.y1; ++y)
             std::memcpy(&img[((std::size_t)y * W + t.x0) * 4],
-                        &r.rgba[(std::size_t)(y - t.y0) * tw * 4],
+                        &px[(std::size_t)(y - t.y0) * tw * 4],
                         (std::size_t)tw * 4 * sizeof(float));
         return;
     }
@@ -133,8 +136,8 @@ void blit(std::vector<float>& img, int W, int H, const TileResult& r) {
             if (x < 0 || x >= W) continue;
             std::size_t src = ((std::size_t)(y - t.y0) * tw + (x - t.x0)) * 4;
             std::size_t dst = ((std::size_t)y * W + x) * 4;
-            if (src + 3 < r.rgba.size())
-                for (int c = 0; c < 4; ++c) img[dst + c] = r.rgba[src + c];
+            if (src + 3 < px.size())
+                for (int c = 0; c < 4; ++c) img[dst + c] = px[src + c];
         }
     }
 }
@@ -196,13 +199,16 @@ MergeResult CompareMerge::merge(const std::vector<TileResult>& results,
             used[j] = true;
             ++compared_pairs;
             int tw = ref.tile.width();
-            std::size_t n = std::min(ref.rgba.size(), other.rgba.size());
+            std::vector<float> scratch_a, scratch_b;
+            const std::vector<float>& pa = ref.floats(scratch_a);
+            const std::vector<float>& pb = other.floats(scratch_b);
+            std::size_t n = std::min(pa.size(), pb.size());
             std::size_t npix = n / 4;
             for (std::size_t p = 0; p < npix; ++p) {
                 double pmax = 0;  // max channel diff at this pixel
                 for (int ch = 0; ch < 4; ++ch) {
                     std::size_t k = p * 4 + ch;
-                    double d = std::fabs((double)ref.rgba[k] - (double)other.rgba[k]);
+                    double d = std::fabs((double)pa[k] - (double)pb[k]);
                     if (d > max_diff) {
                         max_diff = d;
                         m.worst_x = ref.tile.x0 + (int)(p % tw);
@@ -258,6 +264,31 @@ MergeResult CompareMerge::merge(const std::vector<TileResult>& results,
     return m;
 }
 
+// ── Tile queue cursor ─────────────────────────────────────────────────────
+
+TileQueueCursor::TileQueueCursor(std::size_t n_tiles, std::size_t n_execs, QueuePolicy p)
+    : n_(n_tiles),
+      policy_(p == QueuePolicy::Auto ? QueuePolicy::FastestTail : p),
+      ema_(n_execs, 0.0) {}
+
+std::size_t TileQueueCursor::take(std::size_t e, double last_ms) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (e < ema_.size() && last_ms > 0)
+        ema_[e] = ema_[e] > 0 ? 0.7 * ema_[e] + 0.3 * last_ms : last_ms;
+    if (next_ >= n_) return npos;
+    if (policy_ == QueuePolicy::FastestTail && e < ema_.size() && ema_[e] > 0) {
+        double fastest = ema_[e];
+        for (double v : ema_) if (v > 0 && v < fastest) fastest = v;
+        const double k = ema_[e] / fastest;
+        const std::size_t remaining = n_ - next_;
+        // A tile here would outlast what the fastest executor finishes in
+        // the same time; leave the tail to it. (The fast one keeps pulling
+        // until the queue is empty, so nothing is left behind.)
+        if (k > 1.5 && static_cast<double>(remaining) < k) return npos;
+    }
+    return next_++;
+}
+
 // ── Runner ────────────────────────────────────────────────────────────────
 
 MultiPathResult MultiPathExecutor::run(const SceneGraph& scene, int W, int H,
@@ -283,15 +314,19 @@ MultiPathResult MultiPathExecutor::run(const SceneGraph& scene, int W, int H,
         // it. Each tile is rendered by exactly one executor (like a split),
         // so results tile the frame and StitchMerge reassembles them.
         out.tiles.resize(tiles.size());
-        std::atomic<std::size_t> next{0};
+        TileQueueCursor cursor(tiles.size(), avail.size(), queue_policy_);
         std::vector<std::thread> workers;
         workers.reserve(avail.size());
-        for (auto* e : avail) {
-            workers.emplace_back([&, e] {
+        for (std::size_t k = 0; k < avail.size(); ++k) {
+            IExecutor* e = avail[k];
+            workers.emplace_back([&, e, k] {
+                double last_ms = 0;
                 for (;;) {
-                    std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
-                    if (i >= tiles.size()) break;
+                    std::size_t i = cursor.take(k, last_ms);
+                    if (i == TileQueueCursor::npos) break;
+                    auto t0 = clk::now();
                     out.tiles[i] = e->render(scene, W, H, tiles[i]);
+                    last_ms = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
                 }
             });
         }
