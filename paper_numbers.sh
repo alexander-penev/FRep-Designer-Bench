@@ -20,6 +20,12 @@
 set -e
 cd "$(dirname "$0")"
 
+# The per-cell medians are computed in awk, which parses and prints numbers
+# in the caller's locale: under a decimal-comma locale "1.683" reads as 1 and
+# every median prints with a comma, so the table is wrong in a way the CSV
+# header does not reveal. The tools print C-locale CSV; match it here.
+export LC_ALL=C
+
 BIN=frep4_bench/build_render
 OUT=results/paper
 
