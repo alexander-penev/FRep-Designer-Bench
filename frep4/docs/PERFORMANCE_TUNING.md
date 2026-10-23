@@ -263,6 +263,42 @@ for a comparison. And `frep4_pathcost` warms each path for a time window
 boost clock takes a few hundred milliseconds to ramp from idle and three
 frames of a sub-millisecond path would measure the ramp.
 
+Two more things the measurements turned out to hinge on. A two-socket host
+puts the card on one socket's PCIe root, and a process the scheduler places
+on the other pays an inter-socket hop on every readback — 15–48% of a 512²
+frame here. Each GPU context now pins the thread that creates it to the
+card's NUMA node (`core/gpu/gpu_numa.hpp`; `FREP_GPU_NUMA=0` disables), and
+the CPU render pool's workers reset themselves to the launch affinity, so
+the pin never spreads to the CPU path; `paper_numbers.sh` also binds its GPU
+runs with `numactl`. And the energy floor: the card sits in P5 (≈27 W) for
+about ten seconds after a load before dropping to P8 (≈14 W), so a baseline
+taken too soon under-subtracts by 13 W — 9 mJ per frame at 1500 frames per
+second. `frep4_pathcost` waits 12 s before taking it.
+
+Knobs for A/B comparisons, all read from the environment:
+
+| Knob | Effect |
+|---|---|
+| `FREP_FAST_MATH=0` | no relaxed FP flags (contract/nsz/arcp/reassoc) on the IR paths |
+| `FREP_VK_WAIT=block` | plain `vkWaitForFences` instead of spin-then-block |
+| `FREP_GPU_NUMA=0` | do not pin GPU threads to the card's socket |
+| `FREP_BBOX_CLIP=0` | no ray-box clip on any path (IR, GLSL, RTX) |
+| `FREP_CUSTOMEXPR_FD=1` | finite-difference normals for CustomExpr instead of the analytic dual |
+| `FREP_NORMAL_METHOD=analytic\|adir\|fd` | (pathcost, scene_parity) how the IR paths differentiate a CustomExpr |
+| `FREP_CULL_SLABS=n` | (pathcost, scene_parity) per-tile cull with n slabs |
+| `FREP_DEBUG_BOUNDS=1` | print the bounds inferred for each CustomExpr |
+| `FREP_PATHS`, `FREP_WARM_MS` | pathcost: which paths, how long to warm up |
+| `--format float\|rgba8` | pathcost: the TileResult payload (default: each path's fastest) |
+| `--policy plain\|tail`, `--min-ms` | tilequeue bench: queue tail policy, energy window |
+
+The same choices are `TracerConfig` fields for code: `output_format`,
+`normal_method`, `bbox_clip`, `cull_slabs`, and `QueuePolicy` on the
+multi-path runner. Measured on the benchmark set at 512²: the tile cull
+(8 or 16 slabs) is within noise on every path and scene, so it stays off by
+default; the ray-box clip is worth 10–25% on the CPU path and 5–12% on the
+GPU paths for the bounded scenes, and costs 25% on the twisted bar, so it
+stays on with that one caveat recorded.
+
 For frame-level CPU profiling, `perf` samples the JIT'd code but cannot
 name it: the ORC JIT here registers no perf map, so samples inside
 `render_tile` show as raw addresses (calls into libm and the kernel are

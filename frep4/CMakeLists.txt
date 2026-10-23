@@ -146,7 +146,34 @@ add_library(frep_core STATIC
     core/mesh/marching_cubes.cpp
     core/mesh/marching_cubes_tables.cpp
 )
-target_link_libraries(frep_core PUBLIC frep_opts ${LLVM_LIBS} ${CMAKE_DL_LIBS})
+# ── ADIR: reverse-mode AD of a CustomExpr's compiled function ────────────────
+# TracerConfig::NormalMethod::Adir differentiates the expression's scalar LLVM
+# function with the ADIR library (https://github.com/alexander-penev/ADIR),
+# in the same module, as an alternative to the node's own dual-number codegen.
+# Needs ADIR's source tree with a configured build/ (its static libraries);
+# without it the option is a no-op and Adir falls back to Analytic. The ADIR
+# libraries reference LLVM, so they go before the LLVM libraries on the line.
+option(FREP_WITH_ADIR "Differentiate CustomExpr functions with ADIR (NormalMethod::Adir)" ON)
+set(FREP_ADIR_ROOT "$ENV{HOME}/workspace/ADIR" CACHE PATH
+    "ADIR source tree with a configured build/ directory")
+set(FREP_ADIR_LIBS "")
+if(FREP_WITH_ADIR AND EXISTS "${FREP_ADIR_ROOT}/include/adir/Differentiate.h"
+   AND EXISTS "${FREP_ADIR_ROOT}/build/lib/Transform/libADIRTransform.a")
+    set(FREP_ADIR_LIBS
+        "${FREP_ADIR_ROOT}/build/lib/Verify/libADIRVerify.a"
+        "${FREP_ADIR_ROOT}/build/lib/Transform/libADIRTransform.a"
+        "${FREP_ADIR_ROOT}/build/lib/Analysis/libADIRAnalysis.a"
+        "${FREP_ADIR_ROOT}/build/lib/Runtime/libADIRRuntime.a"
+        "${FREP_ADIR_ROOT}/build/lib/libADIRCore.a")
+    message(STATUS "frep: ADIR gradients enabled (${FREP_ADIR_ROOT})")
+else()
+    message(STATUS "frep: ADIR not found at ${FREP_ADIR_ROOT}; NormalMethod::Adir falls back to Analytic")
+endif()
+target_link_libraries(frep_core PUBLIC frep_opts ${FREP_ADIR_LIBS} ${LLVM_LIBS} ${CMAKE_DL_LIBS})
+if(FREP_ADIR_LIBS)
+    target_include_directories(frep_core PUBLIC "${FREP_ADIR_ROOT}/include")
+    target_compile_definitions(frep_core PUBLIC FREP_HAS_ADIR)
+endif()
 # -fno-rtti only for core (because of LLVM headers); PRIVATE so it does not
 # propagate to the GUI target, which needs RTTI for dynamic_cast on QGraphicsItem.
 target_compile_options(frep_core PRIVATE -fno-rtti)

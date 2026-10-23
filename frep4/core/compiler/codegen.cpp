@@ -163,6 +163,7 @@ bool SceneCodegen::acquire_instance_grad_fn(const FRepNode* target,
 
 CgCtx SceneCodegen::make_cgctx(llvm::IRBuilder<>& b, llvm::Value* params_buffer) {
     CgCtx c{ctx_, *mod_, b};
+    c.grad_method = grad_method();
     if (cfg_.incremental_params && params_buffer) {
         c.incremental_params = true;
         c.params_buffer      = params_buffer;
@@ -2875,7 +2876,7 @@ llvm::Function* SceneCodegen::emit_render_tile_vec(const SceneGraph& scene,
     auto splat = [&](llvm::Value* s){ return b.CreateVectorSplat(W, s); };
     auto fcv   = [&](float v){ return b.CreateVectorSplat(W, llvm::ConstantFP::get(F32, v)); };
     auto sdf = [&](llvm::Value* X, llvm::Value* Y, llvm::Value* Z) -> llvm::Value* {
-        CgCtx cg{ctx_, *mod_, b}; cg.width = W;
+        CgCtx cg{ctx_, *mod_, b}; cg.width = W; cg.grad_method = grad_method();
         return root->codegen(cg, X, Y, Z);
     };
     auto vlen = [&](llvm::Value* x, llvm::Value* y, llvm::Value* z){
@@ -3007,7 +3008,7 @@ llvm::Function* SceneCodegen::emit_render_tile_vec(const SceneGraph& scene,
     // node codegen_grad vectorises through CgCtx.width, so the whole gradient is
     // W-wide; .dot is the directional derivative along the seed = one component.
     auto gradN = [&](llvm::Value* X, llvm::Value* Y, llvm::Value* Z, int axis) -> llvm::Value* {
-        CgCtx cg{ctx_, *mod_, b}; cg.width = W;
+        CgCtx cg{ctx_, *mod_, b}; cg.width = W; cg.grad_method = grad_method();
         FRepNode::DualVal dx{X, axis==0 ? fcv(1.0f) : fcv(0.0f)},
                           dy{Y, axis==1 ? fcv(1.0f) : fcv(0.0f)},
                           dz{Z, axis==2 ? fcv(1.0f) : fcv(0.0f)};

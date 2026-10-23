@@ -165,6 +165,14 @@ int main(int argc, char** argv) {
         // FREP_CULL_SLABS=<n> turns the per-tile cull on with n depth slabs
         // (0 = off, the TracerConfig default), for an A/B across the paths.
         if (const char* s = std::getenv("FREP_CULL_SLABS")) cfg.cull_slabs = std::atoi(s);
+        // FREP_NORMAL_METHOD=analytic|adir|fd: how the IR paths differentiate
+        // a CustomExpr for its normal (TracerConfig::NormalMethod).
+        if (const char* s = std::getenv("FREP_NORMAL_METHOD")) {
+            std::string m = s;
+            cfg.normal_method = m == "adir" ? TracerConfig::NormalMethod::Adir
+                              : m == "fd"   ? TracerConfig::NormalMethod::FiniteDiff
+                              :               TracerConfig::NormalMethod::Analytic;
+        }
         auto exec = make_executor(pk, cfg);
         if (!exec || !exec->available()) {
             std::printf("%-9s | %10s\n", name, "unavailable");

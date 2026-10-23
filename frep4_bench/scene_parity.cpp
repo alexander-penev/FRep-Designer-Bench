@@ -83,6 +83,15 @@ int main(int argc, char** argv) {
     if (no_ao)      cfg.enable_ao = false;
     if (shadow_samples > 0) cfg.shadow_samples = shadow_samples;
     cfg.output_format = fmt;
+    // FREP_CULL_SLABS=<n>: the same tile-cull knob pathcost takes, so the cull
+    // can be checked for pixel parity as well as timed.
+    if (const char* s = std::getenv("FREP_CULL_SLABS")) cfg.cull_slabs = std::atoi(s);
+    if (const char* s = std::getenv("FREP_NORMAL_METHOD")) {
+        std::string m = s;
+        cfg.normal_method = m == "adir" ? TracerConfig::NormalMethod::Adir
+                          : m == "fd"   ? TracerConfig::NormalMethod::FiniteDiff
+                          :               TracerConfig::NormalMethod::Analytic;
+    }
     auto ea = make_executor(pa, cfg), eb = make_executor(pb, cfg);
     if (!ea || !eb) { std::fprintf(stderr, "unknown path in '%s'\n", paths.c_str()); return 1; }
     if (!ea->available()) { std::fprintf(stderr, "%s unavailable\n", pa.c_str()); return 1; }

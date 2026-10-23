@@ -37,6 +37,13 @@ enum class NodeKind {
     Plugin,
 };
 
+// How a node that can differentiate itself in more than one way should do it
+// (TracerConfig::NormalMethod without Auto). Only CustomExpr has a choice
+// today: its own dual-number codegen over the expression, the ADIR library's
+// reverse-mode gradient of its compiled function, or the finite-difference
+// default every node has.
+enum class GradMethod { Analytic, Adir, FiniteDiff };
+
 // Context passed during code generation — holds the LLVM state.
 struct CgCtx {
     llvm::LLVMContext& lc;
@@ -44,6 +51,7 @@ struct CgCtx {
     llvm::IRBuilder<>& b;
 
     unsigned     width = 1;   // >1 emits <width x float> (SIMD broadcast path)
+    GradMethod   grad_method = GradMethod::Analytic;
     llvm::Value* vsplat(llvm::Value* s) const {
         return width > 1 ? b.CreateVectorSplat(width, s) : s;
     }

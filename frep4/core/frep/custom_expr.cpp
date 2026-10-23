@@ -11,6 +11,9 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
+#ifdef FREP_HAS_ADIR
+#include <adir/Differentiate.h>   // reverseGradient, for GradMethod::Adir
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -983,6 +986,12 @@ FRepNode::DualVal CustomExprNode::codegen_grad(CgCtx& c, DualVal x, DualVal y,
         return s && s[0] == '1';
     }();
     if (force_fd) return FRepNode::codegen_grad(c, x, y, z);
+    // TracerConfig::normal_method, carried in the context.
+    if (c.grad_method == GradMethod::FiniteDiff) return FRepNode::codegen_grad(c, x, y, z);
+    if (c.grad_method == GradMethod::Adir && c.width == 1) {
+        if (auto r = codegen_grad_adir(c, x, y, z)) return *r;
+        // ADIR not built in, or it refused the function: the analytic form.
+    }
     auto& b = c.b;
     llvm::Type* ty = x.val->getType();               // float or <W x float>
     auto cst = [&](double v) -> llvm::Value* { return llvm::ConstantFP::get(ty, v); };
@@ -1143,6 +1152,65 @@ FRepNode::DualVal CustomExprNode::codegen_grad(CgCtx& c, DualVal x, DualVal y,
     DualVal out = gen(*ast_);
     if (!ok) return FRepNode::codegen_grad(c, x, y, z);   // the universal default
     return out;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CustomExprNode::codegen_grad_adir — the ADIR library's reverse-mode gradient
+// of the expression's compiled scalar function.
+//
+// ADIR differentiates frep_expr_<hash>(x, y, z) in the module and adds
+// frep_expr_<hash>_grad returning {∂x, ∂y, ∂z}; the directional derivative is
+// that gradient dotted with the seed. The tracer seeds the three axes with
+// identical arguments, and the gradient function is pure, so O3 folds the three
+// calls into one. Compared with the node's own forward-mode codegen this is an
+// external, general-purpose derivative of the *compiled* code rather than of the
+// AST — the comparison TracerConfig::NormalMethod exists for.
+// ═════════════════════════════════════════════════════════════════════════════
+std::optional<FRepNode::DualVal>
+CustomExprNode::codegen_grad_adir(CgCtx& c, DualVal x, DualVal y, DualVal z) const {
+#ifndef FREP_HAS_ADIR
+    (void)c; (void)x; (void)y; (void)z;
+    return std::nullopt;
+#else
+    // The scalar function first: codegen() materialises frep_expr_<hash> in the
+    // module (templates included) and returns a call to it — the value.
+    llvm::Value* val = codegen(c, x.val, y.val, z.val);
+    llvm::Function* f = c.mod.getFunction(cached_fn_name_);
+    if (!f || f->isDeclaration()) return std::nullopt;
+
+    const std::string gname = cached_fn_name_ + "_grad";
+    llvm::Function* g = c.mod.getFunction(gname);
+    if (!g) {
+        auto saved = c.b.saveIP();
+        adir::GradientOptions opts;
+        opts.activeArgs   = {0u, 1u, 2u};
+        opts.verifyResult = false;
+        auto res = adir::reverseGradient(c.mod, f, opts);
+        c.b.restoreIP(saved);
+        if (!res) {
+            static bool warned = false;
+            if (!warned) {
+                llvm::errs() << "ADIR: " << res.error().message
+                             << " (expression: " << expr_ << "); using the analytic gradient\n";
+                warned = true;
+            }
+            return std::nullopt;
+        }
+        g = *res;
+        if (g->getName() != gname) g->setName(gname);
+    }
+    if (!g->getReturnType()->isStructTy() || g->getReturnType()->getStructNumElements() != 3)
+        return std::nullopt;
+
+    llvm::Value* gv = c.b.CreateCall(g, {x.val, y.val, z.val}, "expr_grad");
+    llvm::Value* gx = c.b.CreateExtractValue(gv, 0);
+    llvm::Value* gy = c.b.CreateExtractValue(gv, 1);
+    llvm::Value* gz = c.b.CreateExtractValue(gv, 2);
+    llvm::Value* dot = c.b.CreateFAdd(
+        c.b.CreateFAdd(c.b.CreateFMul(gx, x.dot), c.b.CreateFMul(gy, y.dot)),
+        c.b.CreateFMul(gz, z.dot));
+    return DualVal{val, dot};
+#endif
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1364,8 +1432,16 @@ FRepNode::AABB CustomExprNode::infer_bounds() const {
 
     float bx0 = kIvBig, by0 = kIvBig, bz0 = kIvBig, bx1 = -kIvBig, by1 = -kIvBig, bz1 = -kIvBig;
     bool any = false, edge = false;
+    // Work bound. A cell that touches the search box makes the result infinite
+    // whatever else is found, so the walk stops at the first one; and a field
+    // whose surface fills the box (a floor slab under a 400-node expression
+    // took four seconds here before these two cuts) stops at a cell budget.
+    constexpr long kCellBudget = 200000;
+    long cells = 0;
     std::function<void(float, float, float, float, int)> rec =
         [&](float x0, float y0, float z0, float s, int depth) {
+            if (edge || cells > kCellBudget) return;
+            ++cells;
             auto iv = ival(*ast_, {x0, x0 + s}, {y0, y0 + s}, {z0, z0 + s}, reg_);
             if (iv && iv->lo > 0.0f) return;                 // positive throughout: outside
             const bool inside = iv && iv->hi < 0.0f;         // negative throughout: no surface
@@ -1383,11 +1459,14 @@ FRepNode::AABB CustomExprNode::infer_bounds() const {
                 edge = true;                                   // the field reaches the box
         };
     rec(-R, -R, -R, 2.0f * R, 0);
-    const AABB box = (!any || edge) ? AABB::infinite() : AABB{bx0, by0, bz0, bx1, by1, bz1};
+    const bool gave_up = cells > kCellBudget;
+    const AABB box = (!any || edge || gave_up) ? AABB::infinite()
+                                              : AABB{bx0, by0, bz0, bx1, by1, bz1};
     if (std::getenv("FREP_DEBUG_BOUNDS")) {
-        if (!any || edge)
-            std::fprintf(stderr, "custom-expr bounds: unbounded (%s) for %s\n",
-                         !any ? "no cell kept" : "reaches the search box", expr_.c_str());
+        if (!any || edge || gave_up)
+            std::fprintf(stderr, "custom-expr bounds: unbounded (%s, %ld cells) for %s\n",
+                         gave_up ? "cell budget" : !any ? "no cell kept" : "reaches the search box",
+                         cells, expr_.c_str());
         else
             std::fprintf(stderr, "custom-expr bounds: [%g %g %g]..[%g %g %g] for %s\n",
                          box.min_x, box.min_y, box.min_z, box.max_x, box.max_y, box.max_z,

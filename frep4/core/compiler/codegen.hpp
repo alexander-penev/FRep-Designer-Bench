@@ -46,6 +46,19 @@ struct TracerConfig {
     enum class OutputFormat { Auto, Float, RGBA8 };
     OutputFormat output_format = OutputFormat::Auto;
 
+    // ── Surface normal of a CustomExpr on the IR paths ──────────────────────
+    // How the IR paths (CPU and CUDA) differentiate a user-written expression
+    // for its normal. Analytic (what Auto means): the node's own forward-mode
+    // dual-number codegen over the expression AST. Adir: the expression's
+    // compiled scalar function is differentiated by the ADIR library in
+    // reverse mode, in the same module, at compile time (built with
+    // FREP_WITH_ADIR; otherwise falls back to Analytic). FiniteDiff: the
+    // universal central-difference default, six field evaluations per normal.
+    // The GLSL paths always use the analytic form; this is the knob for the
+    // comparison between the three on the IR paths.
+    enum class NormalMethod { Auto, Analytic, Adir, FiniteDiff };
+    NormalMethod normal_method = NormalMethod::Auto;
+
     // ── GPU workgroup tile cull ─────────────────────────────────────────────
     // Before marching, each 8x8 workgroup bounds its own frustum slab stack and
     // discards the depth slabs that provably hold no surface, using the SDF's
@@ -433,6 +446,15 @@ private:
     // render_tile; pass nullptr for stand-alone emit_scene_sdf calls (which
     // means parameters fall back to constants even in Incremental mode).
     CgCtx make_cgctx(llvm::IRBuilder<>& b, llvm::Value* params_buffer);
+
+    // TracerConfig::normal_method as the per-node choice (Auto → Analytic).
+    GradMethod grad_method() const {
+        switch (cfg_.normal_method) {
+            case TracerConfig::NormalMethod::Adir:       return GradMethod::Adir;
+            case TracerConfig::NormalMethod::FiniteDiff: return GradMethod::FiniteDiff;
+            default:                                     return GradMethod::Analytic;
+        }
+    }
 
     // Alloca in the entry block (invariant: must be there for mem2reg).
     llvm::AllocaInst* entry_alloca(llvm::Function* fn, const std::string& name);

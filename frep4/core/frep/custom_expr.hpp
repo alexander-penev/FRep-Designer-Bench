@@ -28,6 +28,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <ostream>
 #include <string>
@@ -230,6 +231,11 @@ private:
     mutable bool inferred_ = false;           // infer_bounds() ran
     mutable AABB inferred_box_ = AABB::infinite();
     AABB infer_bounds() const;
+    // GradMethod::Adir: the gradient of the compiled scalar function by the
+    // ADIR library, added to the module once per expression. nullopt when
+    // ADIR is not built in or refuses the function; the caller then uses the
+    // analytic form.
+    std::optional<DualVal> codegen_grad_adir(CgCtx& c, DualVal x, DualVal y, DualVal z) const;
     static bool emit_glsl_dual_ast(std::ostream& out, const expr::Node& n,
                                    const TemplateRegistry* reg,
                                    const std::string& dx, const std::string& dy,
