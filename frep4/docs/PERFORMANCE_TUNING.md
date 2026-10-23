@@ -295,14 +295,22 @@ trip: the CPU path on 128-px tiles went from 29–32 to 45–48 Mpix/s at 14
 threads.
 
 Composition, measured with that in place (`frep4_tilequeue_bench`, 800²,
-128-px tiles, CPU_IR and GPU_GLSL on one queue): the GPU path alone is
-6–10× the CPU's speed per tile, and the combined run lands 6–20% *below*
-the GPU alone — the GPU's host-side thread runs slower while the CPU band
-works, whichever cores either is given. The "fastest takes the tail" rule
-(`QueuePolicy::FastestTail`) was 5–20% below the plain queue on every
-scene, because tile cost varies thirtyfold across a frame and the last
-tiles in row-major order are the cheap background ones, so `Auto` means
-`Plain`; the bench reports both.
+128-px tiles, CPU_IR and GPU_GLSL on one queue, five interleaved rounds):
+where the CPU path is a quarter to a third of the GPU's speed per tile
+(sphere, CSG difference, blend, twisted bar) the combined run delivers
+89–101% of the two devices' sum, 12–31% more than the GPU alone; where it
+is a sixth or less (gyroid, gear, colonnade) the combination lands *below*
+the GPU alone — by 2–17% under the "fastest takes the tail" rule
+(`QueuePolicy::FastestTail`, what `Auto` means) and 12–27% under the plain
+queue. The tail rule is 5–16% ahead on those unbalanced scenes and 1–8%
+behind on the balanced ones, where tile cost varies thirtyfold across a
+frame and the last tiles in row-major order are the cheap background ones
+a competitive CPU could have taken; the two are within the bench's
+run-to-run spread there. What neither rule recovers is paid throughout the
+frame, not at its tail: the GPU's host-side tile work (fifty microseconds
+of submit, fence wait and readback per 128-px tile) runs slower while the
+CPU band works, whichever cores either side is given. The bench reports
+both policies (`hetero_queue`, `hetero_plain`).
 
 Knobs for A/B comparisons, all read from the environment:
 
@@ -319,7 +327,7 @@ Knobs for A/B comparisons, all read from the environment:
 | `FREP_CPU_PROFILE=1` | one line per CPU frame: content hash, result allocation, render (ms) |
 | `FREP_PATHS`, `FREP_WARM_MS` | pathcost: which paths, how long to warm up |
 | `--format float\|rgba8` | pathcost: the TileResult payload (default: each path's fastest) |
-| `--policy plain\|tail`, `--min-ms` | tilequeue bench: queue tail policy (default plain, see above), energy window |
+| `--policy plain\|tail`, `--min-ms` | tilequeue bench: queue policy (default tail, see above), energy window |
 
 The same choices are `TracerConfig` fields for code: `output_format`,
 `normal_method`, `bbox_clip`, `cull_slabs`, and `QueuePolicy` on the

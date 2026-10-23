@@ -162,7 +162,7 @@ int main(int argc, char** argv) {
     }
     int R = 800, tile_px = 128, frames = 10, rounds = 5, warmup_s = 4;
     // Each run renders at least `frames` frames and at least min_ms (see
-    // run_queue); the queue's tail policy is Auto unless --policy says plain.
+    // run_queue); the queue policy is Auto (the tail rule) unless --policy says otherwise.
     double min_ms = 500.0;
     QueuePolicy policy = QueuePolicy::Auto;
     std::vector<std::string> scenes;
@@ -246,17 +246,20 @@ int main(int argc, char** argv) {
         if (cpu_threads <= 0) cpu_threads = (int)std::thread::hardware_concurrency();
 
         // Four modes per round: each path alone, the combined queue with the
-        // chosen policy, and the combined queue with the plain policy, so the
-        // table can show what the tail rule is worth.
+        // chosen policy (Auto: the tail rule), and the combined queue with the
+        // other policy, so the table can show what the tail rule is worth.
+        const QueuePolicy chosen = policy == QueuePolicy::Auto ? QueuePolicy::FastestTail : policy;
+        const QueuePolicy other  = chosen == QueuePolicy::Plain ? QueuePolicy::FastestTail
+                                                                : QueuePolicy::Plain;
         std::vector<Run> vc, vg, vh, vp;
         for (int r = 0; r < rounds; ++r) {
-            vc.push_back(run_queue({cpu.get()},            scene, R, R, tile_px, frames, min_ms, policy, cpu_e.get(), nullptr));
+            vc.push_back(run_queue({cpu.get()},            scene, R, R, tile_px, frames, min_ms, chosen, cpu_e.get(), nullptr));
             {
                 BusyLoad load(cpu_threads);   // match the combined run's CPU state
-                vg.push_back(run_queue({gpu.get()},        scene, R, R, tile_px, frames, min_ms, policy, nullptr, gpu_e.get()));
+                vg.push_back(run_queue({gpu.get()},        scene, R, R, tile_px, frames, min_ms, chosen, nullptr, gpu_e.get()));
             }
-            vh.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, min_ms, policy, cpu_e.get(), gpu_e.get()));
-            vp.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, min_ms, QueuePolicy::Plain, cpu_e.get(), gpu_e.get()));
+            vh.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, min_ms, chosen, cpu_e.get(), gpu_e.get()));
+            vp.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, min_ms, other,  cpu_e.get(), gpu_e.get()));
         }
         auto median_run = [](std::vector<Run> v) {
             std::sort(v.begin(), v.end(),
@@ -268,9 +271,10 @@ int main(int argc, char** argv) {
         double sum = rc.mpix_s + rg.mpix_s;
         double eff = sum > 0 ? 100.0 * rh.mpix_s / sum : 0;
         double eff_plain = sum > 0 ? 100.0 * rp.mpix_s / sum : 0;
-        std::printf("%-14s %9.2f %9.2f %9.2f %9.2f %5.0f%%  %ld/%ld   plain %9.2f %5.0f%%  %ld/%ld\n",
+        std::printf("%-14s %9.2f %9.2f %9.2f %9.2f %5.0f%%  %ld/%ld   %s %9.2f %5.0f%%  %ld/%ld\n",
                     name.c_str(), rc.mpix_s, rg.mpix_s, sum, rh.mpix_s, eff,
                     rh.tiles_per_exec[0], rh.tiles_per_exec[1],
+                    other == QueuePolicy::Plain ? "plain" : "tail ",
                     rp.mpix_s, eff_plain, rp.tiles_per_exec[0], rp.tiles_per_exec[1]);
         std::fflush(stdout);
 
@@ -282,8 +286,10 @@ int main(int argc, char** argv) {
                          "frep4", backend, name.c_str(), "tilequeue", R,
                          r.ms, r.mpix_s, r.joules, mk);
         };
-        emit("cpu_ir", rc); emit("gpu_glsl", rg); emit("hetero_queue", rh);
-        emit("hetero_plain", rp);
+        // Each combined row is named for the rule it ran, whichever was the
+        // chosen one, so a table can tell the two apart without knowing the default.
+        auto row_name = [](QueuePolicy q) { return q == QueuePolicy::Plain ? "hetero_plain" : "hetero_tail"; };
+        emit("cpu_ir", rc); emit("gpu_glsl", rg); emit(row_name(chosen), rh); emit(row_name(other), rp);
     }
     return 0;
 }

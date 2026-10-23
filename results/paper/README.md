@@ -9,7 +9,7 @@ in the manuscript can be traced to a run rather than to someone's terminal.
 |---|---|
 | `render_512.csv` | Full-frame render at 512², all four paths — the FRep Designer columns of the cross-system render table. `ms` is wall-clock per frame; `build_ms` and `run_ms` separate the one-time setup from the recurring dispatch. |
 | `render_scaling.csv` | The same at 400/800/1280 — the CPU-vs-GPU table and the speed-up-by-resolution figure. |
-| `hetero_tilequeue.csv` | CPU_IR and GPU_GLSL sharing one tile queue at 800²: throughput and measured energy for each device alone and composed. Medians of five interleaved rounds. |
+| `hetero_tilequeue.csv` | CPU_IR and GPU_GLSL sharing one tile queue at 800²: throughput and measured energy for each device alone and composed — under the plain queue (`hetero_plain`) and under the fastest-takes-the-tail rule (`hetero_tail`, the default). Medians of five interleaved rounds; each run lasts at least 500 ms so NVML resolves it. |
 | `rtx_instances.txt` | GPU_RTX multi-BLAS vs CPU_IR on a grid of N separable spheres, with NVML/RAPL energy — the instance-scaling table and figure. |
 | `grid_193.csv` | Raw SDF-evaluation throughput on the shared 193³ grid — the FRep Designer column of the cross-system grid table. |
 
