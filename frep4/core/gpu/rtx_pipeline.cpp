@@ -12,6 +12,7 @@
 #include "core/gpu/rtx_pipeline.hpp"
 #include "core/gpu/rgba_unpack.hpp"
 #include "core/gpu/vk_fence_wait.hpp"
+#include "core/tracer/pixel_buffers.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -762,8 +763,9 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
         const bool transient = (p == nullptr);
         if (transient) vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
         auto t_alloc0 = clk::now();
-        if (want_rgba8) out.rgba8.resize((std::size_t)img_bytes);
-        else            out.rgba.resize((std::size_t)width * height * 4);
+        // Recycled (pixel_buffers.hpp): sized without zeroing, overwritten below.
+        if (want_rgba8) out.rgba8 = take_bytes((std::size_t)img_bytes);
+        else            out.rgba  = take_floats((std::size_t)width * height * 4);
         out.readback_alloc_ms =
             std::chrono::duration<double, std::milli>(clk::now() - t_alloc0).count();
         if (want_rgba8) std::memcpy(out.rgba8.data(), p, (std::size_t)img_bytes);
@@ -1251,8 +1253,9 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
         const bool transient = (p == nullptr);
         if (transient) vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
         auto t_alloc0 = clk::now();
-        if (want_rgba8) out.rgba8.resize((std::size_t)img_bytes);
-        else            out.rgba.resize((std::size_t)width * height * 4);
+        // Recycled (pixel_buffers.hpp): sized without zeroing, overwritten below.
+        if (want_rgba8) out.rgba8 = take_bytes((std::size_t)img_bytes);
+        else            out.rgba  = take_floats((std::size_t)width * height * 4);
         out.readback_alloc_ms =
             std::chrono::duration<double, std::milli>(clk::now() - t_alloc0).count();
         if (want_rgba8) std::memcpy(out.rgba8.data(), p, (std::size_t)img_bytes);

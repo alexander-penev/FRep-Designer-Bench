@@ -174,10 +174,13 @@ public:
         // bus and no host pass widens them), or as the kernel's floats when
         // the caller asked for floats.
         const bool want8 = cfg_.output_format != TracerConfig::OutputFormat::Float;
+        // A recycled buffer (pixel_buffers.hpp): the context's assign then
+        // copies into capacity it already has instead of allocating.
+        const std::size_t n_out = (std::size_t)tile.width() * tile.height() * 4;
         auto t_r = clk::now();
         std::expected<void, std::string> rr;
-        if (want8) { r.format = PixelFormat::RGBA8; rr = cuda_ctx_->render(args, cached_params_, r.rgba8); }
-        else       { r.format = PixelFormat::Float; rr = cuda_ctx_->render(args, cached_params_, r.rgba); }
+        if (want8) { r.format = PixelFormat::RGBA8; r.rgba8 = take_bytes(n_out);  rr = cuda_ctx_->render(args, cached_params_, r.rgba8); }
+        else       { r.format = PixelFormat::Float; r.rgba  = take_floats(n_out); rr = cuda_ctx_->render(args, cached_params_, r.rgba); }
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
         if (!rr) { r.error = "cuda render: " + rr.error(); return r; }
         if (want8) pad_clipped_tile(r.rgba8, tile, W, H);

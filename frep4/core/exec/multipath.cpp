@@ -264,11 +264,18 @@ MergeResult CompareMerge::merge(const std::vector<TileResult>& results,
     return m;
 }
 
+// ── Pixel buffer recycling (core/tracer/pixel_buffers.hpp) ────────────────
+
+TileResult::~TileResult() {
+    recycle(rgba);
+    recycle(rgba8);
+}
+
 // ── Tile queue cursor ─────────────────────────────────────────────────────
 
 TileQueueCursor::TileQueueCursor(std::size_t n_tiles, std::size_t n_execs, QueuePolicy p)
     : n_(n_tiles),
-      policy_(p == QueuePolicy::Auto ? QueuePolicy::FastestTail : p),
+      policy_(p == QueuePolicy::Auto ? QueuePolicy::Plain : p),
       ema_(n_execs, 0.0) {}
 
 std::size_t TileQueueCursor::take(std::size_t e, double last_ms) {

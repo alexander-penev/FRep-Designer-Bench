@@ -20,6 +20,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -67,8 +68,11 @@ public:
         // free. Anything codegen bakes in (geometry, parameter values,
         // materials, visibility, lights) invalidates the cache; keying on the
         // structure alone served a stale image after a parameter edit.
+        // FREP_CPU_PROFILE=1 prints where the host side of a frame goes.
+        static const bool profile = std::getenv("FREP_CPU_PROFILE") != nullptr;
         auto t_c = clk::now();
         const std::size_t shash = scene.content_hash();
+        const double hash_ms = std::chrono::duration<double, std::milli>(clk::now() - t_c).count();
         // With a compile policy installed (set_compile_policy) the runtime-
         // placed parameters are buffer loads, so their values are not in the
         // IR: codegen runs to refresh the bindings and the IR text is compared
@@ -127,8 +131,10 @@ public:
         const int tw = tile.width(), th = tile.height();
         const bool whole = tile.x0 == 0 && tile.y0 == 0 && tw == W && th == H;
         float* target = nullptr;
+        auto t_a = clk::now();
         if (whole) {
-            r.rgba.resize((std::size_t)W * H * 4);
+            // Recycled, not zeroed: the kernel writes every pixel (sky on a miss).
+            r.rgba = take_floats((std::size_t)W * H * 4);
             target = r.rgba.data();
         } else {
             const std::size_t need = (std::size_t)W * H * 4;
@@ -152,14 +158,19 @@ public:
         auto t_r = clk::now();
         TileScheduler::render(*fn, target, scene.camera(), rp,
                               cached_params_.empty() ? nullptr : cached_params_.data());
-        r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
+        auto t_e = clk::now();
+        r.render_ms = std::chrono::duration<double, std::milli>(t_e - t_r).count();
+        if (profile)
+            std::fprintf(stderr, "cpu frame: hash %.3f  alloc %.3f  render %.3f ms\n",
+                         hash_ms, std::chrono::duration<double, std::milli>(t_r - t_a).count(),
+                         r.render_ms);
 
         if (!whole) {
             const float* full = full_.get();
             // Copy the tile region into the result buffer. Row-wise memcpy when
             // the tile is fully inside the frame (the common band/tile case).
             if (tile.x0 >= 0 && tile.y0 >= 0 && tile.x1 <= W && tile.y1 <= H) {
-                r.rgba.resize((std::size_t)tw * th * 4);
+                r.rgba = take_floats((std::size_t)tw * th * 4);   // every row is copied below
                 for (int y = 0; y < th; ++y)
                     std::memcpy(&r.rgba[(std::size_t)y * tw * 4],
                                 &full[((std::size_t)(tile.y0 + y) * W + tile.x0) * 4],

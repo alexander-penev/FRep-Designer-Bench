@@ -22,6 +22,7 @@
 #pragma once
 
 #include "core/frep/scene.hpp"
+#include "core/tracer/pixel_buffers.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -89,6 +90,13 @@ struct TileResult {
     std::size_t peak_rss_kb = 0;
     int         threads_used = 0;
 
+    TileResult() = default;
+    TileResult(const TileResult&) = default;
+    TileResult(TileResult&&) noexcept = default;
+    TileResult& operator=(const TileResult&) = default;
+    TileResult& operator=(TileResult&&) noexcept = default;
+    ~TileResult();   // hands a large pixel buffer back for reuse (see take_floats)
+
     std::size_t pixel_count() const {
         return format == PixelFormat::Float ? rgba.size() / 4 : rgba8.size() / 4;
     }
@@ -124,6 +132,10 @@ struct TileResult {
         format = PixelFormat::RGBA8;
     }
 };
+
+// Result pixel buffers come from take_floats / take_bytes
+// (core/tracer/pixel_buffers.hpp) and go back through ~TileResult, so a
+// frame's 4 MB is neither reallocated nor zeroed on every render.
 
 // An executor renders a given Tile of a scene on one specific path. The
 // implementation owns whatever backend state it needs (JIT engine, Vulkan
@@ -296,13 +308,20 @@ enum class RunMode {
 // How a dynamic tile queue hands out its last tiles.
 //   Plain       — every executor pulls until the queue is empty. The slowest
 //                 can then start a tile the fastest would have finished many
-//                 times over, and the frame waits for it: measured at 800² with
-//                 the GPU 5–20× the CPU's speed, the combined run reached only
-//                 84–96% of the two paths' summed throughput, and on the
-//                 heaviest scenes was slower than the GPU alone.
-//   FastestTail — an executor whose tiles take k times the fastest's does not
-//                 start one when fewer than k tiles remain; the tail goes to
-//                 the fast one. What Auto means today.
+//                 times over, and the frame waits for it. What Auto means
+//                 today, because it measured better (below).
+//   FastestTail — an executor whose tiles take k times the fastest's (k from
+//                 a smoothed per-executor tile time) does not start one when
+//                 fewer than k tiles remain; the tail goes to the fast one.
+// Measured at 800² in 128-px tiles with CPU_IR and GPU_GLSL, the GPU 6–10×
+// the CPU's speed: the tail rule lost 5–20% against the plain queue on every
+// scene. Tile cost varies thirtyfold across a frame and the last tiles in
+// row-major order are the background ones the CPU finishes quickly, so the
+// smoothed average bars the slow executor from exactly the tiles it could
+// have taken; and the combined run's shortfall against the GPU alone is paid
+// throughout the frame (the GPU's host-side thread runs slower while the CPU
+// band works), not at its tail, so no tail rule recovers it. Both policies
+// are measured by the tile-queue bench (hetero_queue / hetero_plain rows).
 enum class QueuePolicy { Auto, Plain, FastestTail };
 
 // The shared cursor of a dynamic tile queue, with the policy applied. One

@@ -1433,11 +1433,21 @@ FRepNode::AABB CustomExprNode::infer_bounds() const {
     float bx0 = kIvBig, by0 = kIvBig, bz0 = kIvBig, bx1 = -kIvBig, by1 = -kIvBig, bz1 = -kIvBig;
     bool any = false, edge = false;
     // Work bound. A cell that touches the search box makes the result infinite
-    // whatever else is found, so the walk stops at the first one; and a field
-    // whose surface fills the box (a floor slab under a 400-node expression
-    // took four seconds here before these two cuts) stops at a cell budget.
+    // whatever else is found, so the walk stops at the first one (depth first,
+    // so a floor slab reaches the finest level and exits after 33 cells); and
+    // a field whose surface fills the box stops at a cell budget (that slab
+    // under a 400-node expression took four seconds before these two cuts).
+    // The walk refines every straddling cell: a level-by-level variant that
+    // refined only the cells on the current box's faces was tried and either
+    // kept coarse interior cells the finer levels would have discarded (the
+    // twisted bar's box went from ±1 to ±4) or, with the face test deferred,
+    // spent the budget on the slab. The twisted bar costs 88000 interval
+    // evaluations and about 80 ms, once per scene load, because sin and cos
+    // of 1.2z over a half-unit cell bound x·cos+y·sin loosely far from the
+    // bar; a rotation-aware bound for that pair would remove most of it.
     constexpr long kCellBudget = 200000;
     long cells = 0;
+    const auto t0 = std::chrono::steady_clock::now();
     std::function<void(float, float, float, float, int)> rec =
         [&](float x0, float y0, float z0, float s, int depth) {
             if (edge || cells > kCellBudget) return;
@@ -1463,14 +1473,16 @@ FRepNode::AABB CustomExprNode::infer_bounds() const {
     const AABB box = (!any || edge || gave_up) ? AABB::infinite()
                                               : AABB{bx0, by0, bz0, bx1, by1, bz1};
     if (std::getenv("FREP_DEBUG_BOUNDS")) {
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count();
         if (!any || edge || gave_up)
-            std::fprintf(stderr, "custom-expr bounds: unbounded (%s, %ld cells) for %s\n",
+            std::fprintf(stderr, "custom-expr bounds: unbounded (%s, %ld cells, %.1f ms) for %s\n",
                          gave_up ? "cell budget" : !any ? "no cell kept" : "reaches the search box",
-                         cells, expr_.c_str());
+                         cells, ms, expr_.c_str());
         else
-            std::fprintf(stderr, "custom-expr bounds: [%g %g %g]..[%g %g %g] for %s\n",
+            std::fprintf(stderr, "custom-expr bounds: [%g %g %g]..[%g %g %g] (%ld cells, %.1f ms) for %s\n",
                          box.min_x, box.min_y, box.min_z, box.max_x, box.max_y, box.max_z,
-                         expr_.c_str());
+                         cells, ms, expr_.c_str());
     }
     return box;
 }

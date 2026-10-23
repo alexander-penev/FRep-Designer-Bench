@@ -275,6 +275,35 @@ about ten seconds after a load before dropping to P8 (≈14 W), so a baseline
 taken too soon under-subtracts by 13 W — 9 mJ per frame at 1500 frames per
 second. `frep4_pathcost` waits 12 s before taking it.
 
+And two the CPU path turned out to hinge on, both found with
+`FREP_CPU_PROFILE=1`, which prints where the host side of each CPU frame
+goes (hash, result allocation, render). A result buffer is a `std::vector`,
+and a vector zero-fills: the 4 MB frame at 512² was zeroed on the calling
+thread over cache lines the workers had just written, 0.5–0.9 ms per frame,
+and the render then paid again to take the lines back. Result buffers are
+recycled now (`core/tracer/pixel_buffers.hpp`: `TileResult`'s destructor
+keeps a few large ones, the executors take them back sized but not
+initialised, and every path writes its frame or tile in full), which took
+the sphere's CPU frame from 1.85 to 0.58 ms and the GPU paths' 1 MB RGBA8
+results along with it. And the process-wide render pool used to broadcast
+one condition variable to wake 13 of its 55 workers; the other 42 woke to
+find they were not needed, on whatever core the kernel chose — in a
+heterogeneous render, the core the GPU thread was spinning on. Each worker
+now has its own condition variable and spins 150 µs before blocking, so
+sub-tiles and queue tiles that arrive back to back cost no futex round
+trip: the CPU path on 128-px tiles went from 29–32 to 45–48 Mpix/s at 14
+threads.
+
+Composition, measured with that in place (`frep4_tilequeue_bench`, 800²,
+128-px tiles, CPU_IR and GPU_GLSL on one queue): the GPU path alone is
+6–10× the CPU's speed per tile, and the combined run lands 6–20% *below*
+the GPU alone — the GPU's host-side thread runs slower while the CPU band
+works, whichever cores either is given. The "fastest takes the tail" rule
+(`QueuePolicy::FastestTail`) was 5–20% below the plain queue on every
+scene, because tile cost varies thirtyfold across a frame and the last
+tiles in row-major order are the cheap background ones, so `Auto` means
+`Plain`; the bench reports both.
+
 Knobs for A/B comparisons, all read from the environment:
 
 | Knob | Effect |
@@ -286,10 +315,11 @@ Knobs for A/B comparisons, all read from the environment:
 | `FREP_CUSTOMEXPR_FD=1` | finite-difference normals for CustomExpr instead of the analytic dual |
 | `FREP_NORMAL_METHOD=analytic\|adir\|fd` | (pathcost, scene_parity) how the IR paths differentiate a CustomExpr |
 | `FREP_CULL_SLABS=n` | (pathcost, scene_parity) per-tile cull with n slabs |
-| `FREP_DEBUG_BOUNDS=1` | print the bounds inferred for each CustomExpr |
+| `FREP_DEBUG_BOUNDS=1` | print the bounds inferred for each CustomExpr, with the cell count and time the search took |
+| `FREP_CPU_PROFILE=1` | one line per CPU frame: content hash, result allocation, render (ms) |
 | `FREP_PATHS`, `FREP_WARM_MS` | pathcost: which paths, how long to warm up |
 | `--format float\|rgba8` | pathcost: the TileResult payload (default: each path's fastest) |
-| `--policy plain\|tail`, `--min-ms` | tilequeue bench: queue tail policy, energy window |
+| `--policy plain\|tail`, `--min-ms` | tilequeue bench: queue tail policy (default plain, see above), energy window |
 
 The same choices are `TracerConfig` fields for code: `output_format`,
 `normal_method`, `bbox_clip`, `cull_slabs`, and `QueuePolicy` on the
@@ -297,7 +327,11 @@ multi-path runner. Measured on the benchmark set at 512²: the tile cull
 (8 or 16 slabs) is within noise on every path and scene, so it stays off by
 default; the ray-box clip is worth 10–25% on the CPU path and 5–12% on the
 GPU paths for the bounded scenes, and costs 25% on the twisted bar, so it
-stays on with that one caveat recorded.
+stays on with that one caveat recorded. The bounds search itself is a few
+hundred interval evaluations for the scenes here, except the twisted bar:
+sin and cos of 1.2z over a half-unit cell bound x·cos+y·sin loosely far
+from the bar, and it takes 88 000 evaluations and about 80 ms, once per
+scene load (a rotation-aware bound for that pair would remove most of it).
 
 For frame-level CPU profiling, `perf` samples the JIT'd code but cannot
 name it: the ORC JIT here registers no perf map, so samples inside

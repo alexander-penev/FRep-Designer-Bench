@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -208,76 +209,114 @@ private:
     // tiles on the calling thread, and returns when every helper has finished.
     // Frames are serialised through call_mutex_, so two callers rendering at
     // once take turns rather than interleave jobs.
+    //
+    // Exactly n-1 workers are woken, each through its own condition variable.
+    // The single variable this used to broadcast on woke all 55 workers for a
+    // frame that wanted 13 of them, and the other 42 ran just long enough to
+    // find they were not needed -- on whatever core the kernel chose, which
+    // in a heterogeneous render was the core the GPU path's thread was
+    // spinning on for its fence: with CPU and GPU sharing one tile queue the
+    // combined run measured 25% below the GPU alone from that alone. (A
+    // counting semaphore was tried first; libstdc++'s wakes every waiter too,
+    // and 55 of them contending for 13 slots on one cache line made the CPU
+    // path seven times slower on 128-px tiles.)
     class Pool {
     public:
         Pool() {
             int hw = static_cast<int>(std::thread::hardware_concurrency());
             n_workers_ = std::max(0, hw - 1);
             workers_.reserve(n_workers_);
-            for (int i = 0; i < n_workers_; ++i)
-                workers_.emplace_back([this, i] { worker_main(i); });
+            for (int i = 0; i < n_workers_; ++i) {
+                workers_.emplace_back(std::make_unique<Worker>());
+                Worker* w = workers_.back().get();
+                w->th = std::thread([this, w] { worker_main(*w); });
+            }
         }
         ~Pool() {
-            { std::lock_guard<std::mutex> lk(m_); stop_ = true; }
-            cv_.notify_all();
-            for (auto& t : workers_) t.join();
+            stop_.store(true);
+            for (auto& w : workers_) {
+                { std::lock_guard<std::mutex> lk(w->m); }
+                w->cv.notify_one();
+            }
+            for (auto& w : workers_) w->th.join();
         }
 
         void run(int n_threads, const std::function<void()>& job) {
             std::lock_guard<std::mutex> call_lock(call_mutex_);
             const int helpers = std::clamp(n_threads - 1, 0, n_workers_);
             if (helpers > 0) {
-                {
-                    std::lock_guard<std::mutex> lk(m_);
-                    job_ = &job;
-                    active_ = helpers;
-                    pending_ = helpers;
-                    ++generation_;
+                job_ = &job;
+                pending_.store(helpers, std::memory_order_relaxed);
+                ++generation_;
+                for (int i = 0; i < helpers; ++i) {
+                    Worker& w = *workers_[i];
+                    // The store under the worker's mutex is what makes the
+                    // wake reliable; a worker still spinning sees it without
+                    // the lock, and notify_one costs no system call then.
+                    { std::lock_guard<std::mutex> lk(w.m); w.gen.store(generation_, std::memory_order_release); }
+                    w.cv.notify_one();
                 }
-                cv_.notify_all();
             }
             job();
             if (helpers > 0) {
                 std::unique_lock<std::mutex> lk(m_);
-                done_cv_.wait(lk, [&] { return pending_ == 0; });
+                done_cv_.wait(lk, [&] { return pending_.load(std::memory_order_acquire) == 0; });
                 job_ = nullptr;
             }
         }
 
     private:
-        void worker_main(int idx) {
+        struct Worker {
+            std::mutex                 m;
+            std::condition_variable    cv;
+            std::atomic<std::uint64_t> gen{0};  // generation this worker is to run
+            std::thread                th;
+        };
+
+        void worker_main(Worker& w) {
             // Whoever created the pool may be pinned to the GPU's socket;
             // the CPU path wants every core it was launched with.
             reset_thread_affinity_to_launch();
             std::uint64_t seen = 0;
             while (true) {
-                const std::function<void()>* job = nullptr;
-                {
-                    std::unique_lock<std::mutex> lk(m_);
-                    cv_.wait(lk, [&] { return stop_ || generation_ != seen; });
-                    if (stop_) return;
-                    seen = generation_;
-                    if (idx >= active_) continue;   // this frame uses fewer threads
-                    job = job_;
+                // Spin briefly before blocking: tiles rendered back to back
+                // (a shared tile queue, a frame of sub-tiles) arrive within
+                // microseconds of each other, and a futex wake costs tens of
+                // microseconds on each of thirteen workers per 128-px tile --
+                // a third of such a tile's render. Idle longer than the spin
+                // window and the worker sleeps, so a paused editor costs
+                // nothing.
+                bool ready = false;
+                const auto spin_until = std::chrono::steady_clock::now() + std::chrono::microseconds(150);
+                for (int i = 0; !ready; ++i) {
+                    ready = stop_.load(std::memory_order_relaxed) ||
+                            w.gen.load(std::memory_order_acquire) != seen;
+                    if (!ready && (i & 63) == 63 && std::chrono::steady_clock::now() >= spin_until) break;
                 }
-                (*job)();
-                {
+                if (!ready) {
+                    std::unique_lock<std::mutex> lk(w.m);
+                    w.cv.wait(lk, [&] {
+                        return stop_.load() || w.gen.load(std::memory_order_acquire) != seen; });
+                }
+                if (stop_.load()) return;
+                seen = w.gen.load(std::memory_order_acquire);
+                (*job_)();
+                if (pending_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
                     std::lock_guard<std::mutex> lk(m_);
-                    if (--pending_ == 0) done_cv_.notify_one();
+                    done_cv_.notify_one();
                 }
             }
         }
 
-        std::mutex                 call_mutex_;
-        std::mutex                 m_;
-        std::condition_variable    cv_, done_cv_;
-        std::vector<std::thread>   workers_;
-        int                        n_workers_  = 0;
-        int                        active_     = 0;
-        int                        pending_    = 0;
-        std::uint64_t              generation_ = 0;
-        bool                       stop_       = false;
-        const std::function<void()>* job_ = nullptr;
+        std::mutex                           call_mutex_;
+        std::mutex                           m_;
+        std::condition_variable              done_cv_;
+        std::vector<std::unique_ptr<Worker>> workers_;
+        int                                  n_workers_  = 0;
+        std::uint64_t                        generation_ = 0;   // under call_mutex_
+        std::atomic<int>                     pending_{0};
+        std::atomic<bool>                    stop_{false};
+        const std::function<void()>*         job_ = nullptr;
     };
 
     static Pool& pool() {

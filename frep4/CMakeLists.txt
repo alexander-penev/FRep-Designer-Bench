@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(frep VERSION 4.54.0 LANGUAGES C CXX)
+project(frep VERSION 4.55.0 LANGUAGES C CXX)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # C++26
@@ -128,6 +128,7 @@ target_include_directories(frep_opts INTERFACE
 add_library(frep_core STATIC
     core/compiler/codegen.cpp
     core/tracer/cpu_affinity.cpp
+    core/tracer/pixel_buffers.cpp
     core/frep/custom_expr.cpp
     core/frep/expr_ast.cpp
     core/frep/template_fn.cpp

@@ -140,10 +140,13 @@ public:
         // RGBA8 the shader wrote (the default — a 1 MB memcpy at 512²), or
         // widened to float in one pass when the caller asked for floats.
         const bool want8 = cfg_.output_format != TracerConfig::OutputFormat::Float;
+        // Sized here from a recycled buffer (pixel_buffers.hpp) so the
+        // context's resize neither allocates nor zeroes; it overwrites.
+        const std::size_t n_out = (std::size_t)tile.width() * tile.height() * 4;
         auto t_r = clk::now();
         std::expected<void, std::string> rr;
-        if (want8) { r.format = PixelFormat::RGBA8; rr = ctx_->render(push, r.rgba8); }
-        else       { r.format = PixelFormat::Float; rr = ctx_->render(push, r.rgba); }
+        if (want8) { r.format = PixelFormat::RGBA8; r.rgba8 = take_bytes(n_out);  rr = ctx_->render(push, r.rgba8); }
+        else       { r.format = PixelFormat::Float; r.rgba  = take_floats(n_out); rr = ctx_->render(push, r.rgba); }
         r.render_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r).count();
         if (!rr) { r.error = "gpu render failed"; return r; }
 
