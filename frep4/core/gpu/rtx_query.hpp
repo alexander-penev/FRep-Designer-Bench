@@ -8,19 +8,23 @@
 // The difference is WHERE the march runs:
 //
 //   SBT pipeline (rtx_shaders.emit_intersection): the whole sphere-march lives
-//     inside an *intersection shader*. The RT scheduler expects short
-//     intersection shaders (a quadric = a few ops); a 100-step march there runs
-//     at poor occupancy and the RT cores stall — so on a single-primitive scene
-//     the path is ~5x the plain GLSL compute march (measured).
+//     inside an *intersection shader*, reached through the pipeline's shader
+//     stages.
 //
 //   Ray query (this file): a plain COMPUTE shader runs rayQueryEXT for the
 //     hardware BVH broad phase (which box?) and marches scene_sdf INLINE in the
-//     compute shader at full occupancy — the same code the GLSL path runs, plus
-//     hardware culling. This removes the intersection-shader tax.
+//     compute shader — the same code the GLSL path runs, plus hardware culling.
 //
-// Requires VK_KHR_ray_query (RtxCtx::has_ray_query()). Single-BLAS (whole-scene
-// box) scenes only for now — enough to isolate the intersection-shader tax on
-// the case where the SBT path loses.
+// What the two measure (RTX 2080, 512², GPU timestamps, October 2026): the
+// same within noise -- sphere 0.056 against 0.057 ms of shader time, gyroid
+// 0.063 against 0.070, colonnade 0.210 against 0.237 -- and both a fixed
+// 0.02-0.03 ms above the compute path. The cost is the hardware ray cast
+// itself, not the pipeline's stage transitions, which is what this control
+// establishes; see docs/PERFORMANCE_TUNING.md. The executor runs this path
+// under FREP_RTX_MODE=query (rtx_query_trace_cached below).
+//
+// Requires VK_KHR_ray_query (RtxCtx::has_ray_query()). Single-BLAS scenes
+// (one box, or the shell cells of rtx_cells.hpp).
 
 #pragma once
 

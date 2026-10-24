@@ -303,22 +303,30 @@ trip: the CPU path on 128-px tiles went from 29–32 to 45–48 Mpix/s at 14
 threads.
 
 Composition, measured with that in place (`frep4_tilequeue_bench`, 800²,
-128-px tiles, CPU_IR and GPU_GLSL on one queue, five interleaved rounds):
-where the CPU path is a quarter to a third of the GPU's speed per tile
-(sphere, CSG difference, blend, twisted bar) the combined run delivers
-89–101% of the two devices' sum, 12–31% more than the GPU alone; where it
-is a sixth or less (gyroid, gear, colonnade) the combination lands *below*
-the GPU alone — by 2–17% under the "fastest takes the tail" rule
-(`QueuePolicy::FastestTail`, what `Auto` means) and 12–27% under the plain
-queue. The tail rule is 5–16% ahead on those unbalanced scenes and 1–8%
-behind on the balanced ones, where tile cost varies thirtyfold across a
-frame and the last tiles in row-major order are the cheap background ones
-a competitive CPU could have taken; the two are within the bench's
-run-to-run spread there. What neither rule recovers is paid throughout the
-frame, not at its tail: the GPU's host-side tile work (fifty microseconds
-of submit, fence wait and readback per 128-px tile) runs slower while the
-CPU band works, whichever cores either side is given. The bench reports
-both policies (`hetero_queue`, `hetero_plain`).
+128-px cells, CPU_IR at 14 threads and GPU_GLSL on one queue, five
+interleaved rounds, each path alone measured at its best in the harness).
+The queue's policy decides most of what the combination is worth. With one
+128-px cell per take — under the plain queue or the "fastest takes the
+tail" rule (`QueuePolicy::FastestTail`) — the GPU pays its fixed
+per-dispatch cost (the launch, the copy back, the fence; about fifty
+microseconds) on every cell, and the two devices together reach 197–421
+Mpix/s, a quarter to a third of their sum. The guided queue
+(`QueuePolicy::Guided`, what `Auto` means) sizes each take to the executor:
+a run of consecutive cells, a strip of a row or whole rows, proportional to
+its share of the measured speed and to what is left, shrinking as the
+frame drains, with one-cell probes for an executor not yet measured and the
+speeds carried from frame to frame. It reaches 378–719 Mpix/s, 1.5–2.7×
+the other two rules on every scene and 54–65% of the sum. It does not
+reach the GPU alone: the GPU, given the frame in a few large takes, does
+798–952 Mpix/s by itself (573 on the colonnade), and adding the CPU band
+lands 24–42% below that on every scene, including the ones where the CPU
+is a fifth of the GPU's speed (sphere, CSG difference, twist). The loss
+is during the frame, not at its tail — the GPU's host-side work slows
+while the CPU band runs, and more CPU threads make it worse (the sphere's
+combined figure 613 Mpix/s at 12 threads, 689 at 14, 556 at 26) — so on
+this machine a CPU band adds to a GPU only while the GPU is handicapped,
+which the guided queue removed. The bench reports all three policies
+(`hetero_tail`, `hetero_plain`, `hetero_guided`).
 
 Knobs for A/B comparisons, all read from the environment:
 

@@ -176,16 +176,56 @@ do_hetero() {
 # the driver's shader cache and the card's clocks start the same way for
 # both. The CPU column comes from the same runs, so it is measured on the
 # same build as the trace columns rather than carried over from an older one.
+#
+# Protocol (the table's caption states it): every point in its own process,
+# three runs, medians; the driver's shader disk cache off so a build is a
+# build. A long sweep in one process parked the card between the slow builds
+# and the later points came out low and scattered (N=1024 read 33 and 10
+# Mpix/s with a two-thirds spread), which is the artefact the bench's own
+# comment warns about.
 do_rtx() {
     [ -x "$BIN/frep4/frep_rtx_bench" ] || {
         echo "skip rtx: $BIN/frep4/frep_rtx_bench not built" >&2; return 0; }
-    f="$OUT/rtx_instances.txt"; provenance "$f"
-    bind_gpu "$BIN/frep4/frep_rtx_bench" --width 1024 --height 1024 \
-        --counts 1,4,16,64,256,1024 --energy >> "$f" 2>&1 || true
-    echo "-> $f"
-    f="$OUT/rtx_instances_factor.txt"; provenance "$f"
-    bind_gpu "$BIN/frep4/frep_rtx_bench" --width 1024 --height 1024 \
-        --counts 1,4,16,64,256,1024 --energy --factor >> "$f" 2>&1 || true
+    # The bench instances by default (one prototype BLAS placed N times);
+    # FREP_RTX_NO_INSTANCING=1 pins the per-member build, one bottom-level
+    # structure and one intersection shader per copy.
+    raw="$OUT/rtx_instances_raw.txt"; provenance "$raw"
+    for con in member proto; do
+        noinst=0; [ "$con" = member ] && noinst=1
+        for n in 1 4 16 64 256 1024; do
+            for run in 1 2 3; do
+                echo "## construction=$con N=$n run=$run" >> "$raw"
+                FREP_RTX_NO_INSTANCING=$noinst __GL_SHADER_DISK_CACHE=0 \
+                    bind_gpu "$BIN/frep4/frep_rtx_bench" \
+                    --width 1024 --height 1024 --counts "$n" --energy \
+                    2>&1 | grep -E "^ +$n +[0-9]" >> "$raw" || true
+            done
+        done
+    done
+    echo "-> $raw"
+    # Medians over the three runs: N, construction, cpu Mpix/s, rtx Mpix/s,
+    # build ms, structure MiB, cpu and rtx Mpix/kWh.
+    f="$OUT/rtx_instances.csv"; provenance "$f"
+    echo "N,construction,cpu_mpix_s,rtx_mpix_s,build_ms,as_mib,cpu_mpix_kwh,rtx_mpix_kwh" >> "$f"
+    for con in member proto; do
+        for n in 1 4 16 64 256 1024; do
+            awk -v con="$con" -v n="$n" '
+                /^## / { cur = ($2 == "construction=" con && $3 == "N=" n) }
+                cur && $1 == n {
+                    # columns: N groups shaders BLAS MiB build cpu+-x% rtx+-x% sum cpukwh rtxkwh
+                    cpu[++k] = $7 + 0; rtx[k] = $9 + 0; bld[k] = $6 + 0; mib[k] = $5 + 0;
+                    ck[k] = $12 + 0; rk[k] = $13 + 0
+                }
+                function med(a, m,   i, j, t) {
+                    for (i = 1; i <= m; i++) for (j = i + 1; j <= m; j++)
+                        if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
+                    return a[int((m + 1) / 2)]
+                }
+                END { if (k) printf "%d,%s,%.1f,%.1f,%.1f,%.2f,%.0f,%.0f\n", n, con,
+                        med(cpu, k), med(rtx, k), med(bld, k), med(mib, k), med(ck, k), med(rk, k) }
+            ' "$raw" >> "$f"
+        done
+    done
     echo "-> $f"
 }
 

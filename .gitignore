@@ -22,3 +22,4 @@
 
 # A second build tree used while a subagent builds in build_render.
 frep4_bench/build_r3/
+results/_backup_*/
