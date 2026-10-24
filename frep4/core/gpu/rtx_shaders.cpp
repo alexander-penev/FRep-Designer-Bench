@@ -127,14 +127,32 @@ std::string lift_push_block(const std::string& comp_src, std::string& error) {
 // that makes the instanced case exact. Applying it to both is also what lets
 // the two constructions be compared on instancing alone rather than on
 // instancing plus this.
+//
+// `cells`: the bottom-level structure holds the field's shell cells
+// (rtx_cells.hpp) rather than one box, and this shader is invoked once per
+// cell a ray enters. It then marches only the ray's segment inside that cell,
+// read from the box list at binding 4 by gl_PrimitiveID, and reports a hit
+// found there; a cell it leaves without a hit reports nothing and the
+// traversal moves on to the next. The hardware keeps the nearest reported hit
+// and shortens the ray past it, so cells behind the surface are never
+// marched. The march is the same loop as the compute path's, restarted at
+// each cell face: a ray converges to the same surface point to within the
+// step epsilon, and only a near-tangent ray can end up on the other side of
+// the hit test from the compute path, which is the silhouette difference the
+// parity table already tolerates between any two marchers.
 inline std::string emit_intersection(const char* hdr, const std::string& push,
                                      const std::string& shared,
                                      const TracerConfig& cfg,
                                      bool object_space = false,
                                      bool carry_normal = false,
-                                     const FRepNode::AABB* clip_box = nullptr) {
+                                     const FRepNode::AABB* clip_box = nullptr,
+                                     bool cells = false) {
     std::ostringstream s;
     s << hdr << push << shared;
+    if (cells)
+        s << "layout(std430, set = 0, binding = 4) readonly buffer RtCells {\n"
+          << "    float v[];   // six per cell: min.xyz, max.xyz\n"
+          << "} rt_cells;\n";
     if (carry_normal)
         // Not named `hit`: the march below already has a local `bool hit`,
         // and the shadowed name turns hit.pos into a swizzle of a boolean.
@@ -163,7 +181,24 @@ inline std::string emit_intersection(const char* hdr, const std::string& push,
     // and converges to the same hit: the BVH only gates which rays reach this
     // shader, it does not narrow where they start. World space only; a group
     // or instance marches its own box in object space.
-    if (clip_box && !object_space) {
+    if (cells && !object_space) {
+        // Clip to this invocation's cell. The slab test is the one the
+        // compute path applies to the scene box; here the planes are the
+        // cell's, so the march covers exactly the ray's segment in the cell.
+        s << "    {\n"
+          << "        int c = 6 * gl_PrimitiveID;\n"
+          << "        vec3 bmin = vec3(rt_cells.v[c], rt_cells.v[c + 1], rt_cells.v[c + 2]);\n"
+          << "        vec3 bmax = vec3(rt_cells.v[c + 3], rt_cells.v[c + 4], rt_cells.v[c + 5]);\n"
+          << "        vec3 inv = 1.0 / rd;\n"
+          << "        vec3 t1 = (bmin - ro) * inv;\n"
+          << "        vec3 t2 = (bmax - ro) * inv;\n"
+          << "        vec3 tmn = min(t1, t2);\n"
+          << "        vec3 tmx = max(t1, t2);\n"
+          << "        t    = max(t, max(max(tmn.x, tmn.y), tmn.z));\n"
+          << "        tmax = min(tmax, min(min(tmx.x, tmx.y), tmx.z));\n"
+          << "        if (t > tmax) return;\n"
+          << "    }\n";
+    } else if (clip_box && !object_space) {
         // Same literal formatting as the compute emitter's flit(), so both
         // shaders clip at bit-identical planes.
         auto lit = [](float v) {
@@ -374,7 +409,7 @@ inline std::string emit_shadow_miss(const char* hdr) {
 }  // namespace
 
 std::expected<RtShaderSet, std::string>
-emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg_in) {
+emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg_in, bool cells) {
     const TracerConfig cfg = rt_cfg(cfg_in);
     auto comp = GlslEmitter::emit(scene, cfg);
     if (!comp) return std::unexpected("rtx_shaders: " + comp.error());
@@ -437,7 +472,12 @@ emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg_in) {
           << shared_block  // for sky_color_s (analytic scenes have no extra bindings)
           << "layout(location = 0) rayPayloadEXT vec3 prd;\n"
           << "layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;\n"
-          << "layout(set = 0, binding = 1, rgba8) uniform image2D out_img;\n"
+          // 8 bits per channel, or floats when the caller asked for them
+          // (TracerConfig::output_format) -- the same choice the compute
+          // emitter makes, so the frame image the trace writes matches.
+          << "layout(set = 0, binding = 1, "
+          << (cfg.output_format == TracerConfig::OutputFormat::Float ? "rgba32f" : "rgba8")
+          << ") uniform image2D out_img;\n"
           << "void main() {\n"
           << "    ivec2 pix = ivec2(gl_LaunchIDEXT.xy);\n"
           << "    int W = pc.width, H = pc.height;\n"
@@ -477,8 +517,9 @@ emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg_in) {
     // The whole-scene clip box, when the scene has one (scene_bounds.hpp).
     FRepNode::AABB clip{};
     const bool clipped = cfg.bbox_clip && scene_clip_box(scene, clip);
+    set.cells = cells;
     set.rint = emit_intersection(hdr, push, shared_block, cfg, false, false,
-                                 clipped ? &clip : nullptr);
+                                 clipped ? &clip : nullptr, cells);
 
     // ── Closest hit: normal + shade ─────────────────────────────────────────
     {

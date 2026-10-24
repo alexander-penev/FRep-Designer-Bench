@@ -72,17 +72,28 @@ inline Iv expr_interval(const expr::Node& n, Iv X, Iv Y, Iv Z) {
         case K::UnaryNeg: return neg(expr_interval(*n.children[0],X,Y,Z));
         case K::BinOp: {
             Iv a=expr_interval(*n.children[0],X,Y,Z), b=expr_interval(*n.children[1],X,Y,Z);
+            Iv v{-1e30f,1e30f};
             switch (n.bop) {
-                case expr::Op::Add: return add(a,b);
-                case expr::Op::Sub: return sub(a,b);
+                case expr::Op::Add: v = add(a,b); break;
+                case expr::Op::Sub: v = sub(a,b); break;
                 case expr::Op::Mul: {
                     auto& c0=*n.children[0]; auto& c1=*n.children[1];
                     bool s = (&c0==&c1) || (c0.kind==K::Var && c1.kind==K::Var && c0.ident==c1.ident);
-                    return s ? sqr(a) : mul(a,b);
+                    v = s ? sqr(a) : mul(a,b);
+                    break;
                 }
-                case expr::Op::Div: return div(a,b);
+                case expr::Op::Div: v = div(a,b); break;
             }
-            return {-1e30f,1e30f};
+            // Rotation pair (expr_ast.hpp): ±a·cos θ ± b·sin θ lies in [-r, r],
+            // r = sqrt(a² + b²), whatever θ does over the box. The term-by-term
+            // sum above lets both products be extreme at once and is up to √2
+            // wider; the intersection keeps whichever end is tighter.
+            if (auto rp = expr::match_rotation_pair(n)) {
+                Iv A=expr_interval(*rp->a,X,Y,Z), B=expr_interval(*rp->b,X,Y,Z);
+                float r = std::sqrt(std::max(A.lo*A.lo,A.hi*A.hi) + std::max(B.lo*B.lo,B.hi*B.hi));
+                v = {std::max(v.lo,-r), std::min(v.hi,r)};
+            }
+            return v;
         }
         case K::Call: {
             const auto& f=n.ident;
@@ -92,7 +103,18 @@ inline Iv expr_interval(const expr::Node& n, Iv X, Iv Y, Iv Z) {
             if (f=="sin")  return isin(a);
             if (f=="cos")  return icos(a);
             if (f=="min")  return imin(a, expr_interval(*n.children[1],X,Y,Z));
-            if (f=="max")  return imax(a, expr_interval(*n.children[1],X,Y,Z));
+            if (f=="max") {
+                Iv v = imax(a, expr_interval(*n.children[1],X,Y,Z));
+                // Rotated box (expr_ast.hpp): max(|P| + c1, |Q| + c2) with (P, Q) = (a, b)
+                // turned by θ is at least sqrt((a² + b²)/2) + min(c1, c2). The term-by-
+                // term max above falls to min(c1, c2) wherever P and Q both straddle 0,
+                // which far from the axis they do as soon as θ spans a quarter turn.
+                if (auto rb = expr::match_rotated_box(n)) {
+                    Iv A=sqr(expr_interval(*rb->a,X,Y,Z)), B=sqr(expr_interval(*rb->b,X,Y,Z));
+                    v.lo = std::max(v.lo, std::sqrt(0.5f*(A.lo+B.lo)) + std::min(rb->c1, rb->c2));
+                }
+                return v;
+            }
             return {-1e30f,1e30f};
         }
     }

@@ -81,20 +81,29 @@ Run run_queue(std::vector<IExecutor*> execs, const SceneGraph& scene,
     };
 
     long done = 0;
+    // One queue for the sequence, reset per frame, so the per-executor cell
+    // times it measures carry from frame to frame as they would in a viewport.
+    TileQueue queue(tiles, execs.size(), policy);
     while (done < frames || elapsed_ms() < min_ms) {
-        TileQueueCursor cursor(tiles.size(), execs.size(), policy);
+        // The cells are the same 128-px grid for every policy; under Guided a
+        // take merges consecutive cells into a strip or a block, so the count
+        // below is of cells rendered, not of render() calls.
+        queue.reset();
         std::vector<std::thread> pool;
         for (size_t e = 0; e < execs.size(); ++e) {
             pool.emplace_back([&, e] {
                 double last_ms = 0;
-                for (;;) {
-                    size_t i = cursor.take(e, last_ms);
-                    if (i == TileQueueCursor::npos) break;
+                Tile t;
+                while (queue.take(e, last_ms, t)) {
                     auto tt0 = std::chrono::steady_clock::now();
-                    TileResult r = execs[e]->render(scene, W, H, tiles[i]);
+                    TileResult r = execs[e]->render(scene, W, H, t);
                     last_ms = std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - tt0).count();
-                    if (r.ok) counts[e].fetch_add(1, std::memory_order_relaxed);
+                    if (r.ok) {
+                        const long cells = (long)((t.width() + tile_px - 1) / tile_px) *
+                                           (long)((t.height() + tile_px - 1) / tile_px);
+                        counts[e].fetch_add(cells, std::memory_order_relaxed);
+                    }
                 }
             });
         }
@@ -177,8 +186,9 @@ int main(int argc, char** argv) {
         else if (a == "--min-ms") min_ms = next(500);
         else if (a == "--policy" && i + 1 < argc) {
             std::string p = argv[++i];
-            policy = p == "plain" ? QueuePolicy::Plain
-                   : p == "tail"  ? QueuePolicy::FastestTail : QueuePolicy::Auto;
+            policy = p == "plain"  ? QueuePolicy::Plain
+                   : p == "tail"   ? QueuePolicy::FastestTail
+                   : p == "guided" ? QueuePolicy::Guided : QueuePolicy::Auto;
         }
         else scenes.push_back(a);
     }
@@ -186,15 +196,20 @@ int main(int argc, char** argv) {
     auto cpu_e = make_cpu_energy_counter();
     auto gpu_e = make_gpu_energy_counter();
 
-    std::printf("tile-queue heterogeneous throughput  %dx%d, %d-px tiles, "
-                "%d frames/run, %d interleaved rounds (medians), %ds warm-up\n",
-                R, R, tile_px, frames, rounds, warmup_s);
+    std::printf("tile-queue heterogeneous throughput  %dx%d, %d-px cells, "
+                "%d frames/run, %d interleaved rounds (medians), %ds warm-up; "
+                "Auto = %s\n",
+                R, R, tile_px, frames, rounds, warmup_s,
+                TileQueue::resolve(policy) == QueuePolicy::Guided ? "guided"
+                : TileQueue::resolve(policy) == QueuePolicy::Plain ? "plain" : "tail");
     std::printf("energy: cpu=%s gpu=%s\n\n",
                 cpu_e && cpu_e->available() ? cpu_e->domain().c_str() : "n/a",
                 gpu_e && gpu_e->available() ? gpu_e->domain().c_str() : "n/a");
-    std::printf("%-14s %9s %9s %9s %9s %6s  %s\n",
-                "scene", "cpu", "gpu", "sum", "cpu+gpu", "eff", "tiles cpu/gpu");
-    std::printf("---------------+---------+---------+---------+---------+------+--------------\n");
+    std::printf("%-14s %9s %9s %9s | %9s %5s %-9s | %9s %5s %-9s | %9s %5s %-9s\n",
+                "scene", "cpu", "gpu", "sum", "tail", "eff", "cells c/g",
+                "plain", "eff", "cells c/g", "guided", "eff", "cells c/g");
+    std::printf("---------------+---------+---------+-----------+-----------------------------"
+                "+-----------------------------+----------------------------\n");
 
     for (const auto& path : scenes) {
         std::string name = path;
@@ -245,37 +260,42 @@ int main(int argc, char** argv) {
         if (const char* t = std::getenv("FREP4_CPU_THREADS")) cpu_threads = std::atoi(t);
         if (cpu_threads <= 0) cpu_threads = (int)std::thread::hardware_concurrency();
 
-        // Four modes per round: each path alone, the combined queue with the
-        // chosen policy (Auto: the tail rule), and the combined queue with the
-        // other policy, so the table can show what the tail rule is worth.
-        const QueuePolicy chosen = policy == QueuePolicy::Auto ? QueuePolicy::FastestTail : policy;
-        const QueuePolicy other  = chosen == QueuePolicy::Plain ? QueuePolicy::FastestTail
-                                                                : QueuePolicy::Plain;
-        std::vector<Run> vc, vg, vh, vp;
+        // Five modes per round: each path alone, then the combined queue under
+        // each of the three policies, so the table shows what the tail rule
+        // and the guided chunking are each worth. A path alone runs under the
+        // guided policy whatever --policy says: with one executor the queue
+        // hands it the frame in a few large takes, which is the best that
+        // path can do in this harness, and `sum` should be the sum of bests
+        // rather than of two paths handicapped by 128-px tiles. (--policy is
+        // kept for the Auto resolution the bench prints; every policy is run.)
+        const QueuePolicy chosen = QueuePolicy::Guided;
+        const QueuePolicy pols[3] = { QueuePolicy::FastestTail, QueuePolicy::Plain,
+                                      QueuePolicy::Guided };
+        std::vector<Run> vc, vg, vh[3];
         for (int r = 0; r < rounds; ++r) {
             vc.push_back(run_queue({cpu.get()},            scene, R, R, tile_px, frames, min_ms, chosen, cpu_e.get(), nullptr));
             {
                 BusyLoad load(cpu_threads);   // match the combined run's CPU state
                 vg.push_back(run_queue({gpu.get()},        scene, R, R, tile_px, frames, min_ms, chosen, nullptr, gpu_e.get()));
             }
-            vh.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, min_ms, chosen, cpu_e.get(), gpu_e.get()));
-            vp.push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, min_ms, other,  cpu_e.get(), gpu_e.get()));
+            for (int p = 0; p < 3; ++p)
+                vh[p].push_back(run_queue({cpu.get(), gpu.get()}, scene, R, R, tile_px, frames, min_ms, pols[p], cpu_e.get(), gpu_e.get()));
         }
         auto median_run = [](std::vector<Run> v) {
             std::sort(v.begin(), v.end(),
                       [](const Run& a, const Run& b) { return a.mpix_s < b.mpix_s; });
             return v[v.size() / 2];
         };
-        Run rc = median_run(vc), rg = median_run(vg), rh = median_run(vh), rp = median_run(vp);
+        Run rc = median_run(vc), rg = median_run(vg);
+        Run rh[3] = { median_run(vh[0]), median_run(vh[1]), median_run(vh[2]) };
 
         double sum = rc.mpix_s + rg.mpix_s;
-        double eff = sum > 0 ? 100.0 * rh.mpix_s / sum : 0;
-        double eff_plain = sum > 0 ? 100.0 * rp.mpix_s / sum : 0;
-        std::printf("%-14s %9.2f %9.2f %9.2f %9.2f %5.0f%%  %ld/%ld   %s %9.2f %5.0f%%  %ld/%ld\n",
-                    name.c_str(), rc.mpix_s, rg.mpix_s, sum, rh.mpix_s, eff,
-                    rh.tiles_per_exec[0], rh.tiles_per_exec[1],
-                    other == QueuePolicy::Plain ? "plain" : "tail ",
-                    rp.mpix_s, eff_plain, rp.tiles_per_exec[0], rp.tiles_per_exec[1]);
+        auto eff = [&](const Run& r) { return sum > 0 ? 100.0 * r.mpix_s / sum : 0.0; };
+        std::printf("%-14s %9.2f %9.2f %9.2f", name.c_str(), rc.mpix_s, rg.mpix_s, sum);
+        for (int p = 0; p < 3; ++p)
+            std::printf(" | %9.2f %4.0f%% %4ld/%-4ld", rh[p].mpix_s, eff(rh[p]),
+                        rh[p].tiles_per_exec[0], rh[p].tiles_per_exec[1]);
+        std::printf("\n");
         std::fflush(stdout);
 
         // CSV rows for the results table (throughput in Mpix/s; energy if present).
@@ -286,10 +306,10 @@ int main(int argc, char** argv) {
                          "frep4", backend, name.c_str(), "tilequeue", R,
                          r.ms, r.mpix_s, r.joules, mk);
         };
-        // Each combined row is named for the rule it ran, whichever was the
-        // chosen one, so a table can tell the two apart without knowing the default.
-        auto row_name = [](QueuePolicy q) { return q == QueuePolicy::Plain ? "hetero_plain" : "hetero_tail"; };
-        emit("cpu_ir", rc); emit("gpu_glsl", rg); emit(row_name(chosen), rh); emit(row_name(other), rp);
+        // Each combined row is named for the rule it ran, so a table can tell
+        // them apart without knowing the default.
+        emit("cpu_ir", rc); emit("gpu_glsl", rg);
+        emit("hetero_tail", rh[0]); emit("hetero_plain", rh[1]); emit("hetero_guided", rh[2]);
     }
     return 0;
 }

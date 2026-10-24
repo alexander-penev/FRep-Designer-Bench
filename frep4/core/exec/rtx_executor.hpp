@@ -26,6 +26,8 @@
 #include "core/gpu/rtx_caps.hpp"
 #include "core/gpu/rtx_ctx.hpp"
 #include "core/gpu/rtx_accel.hpp"
+#include "core/gpu/rtx_cells.hpp"
+#include "core/gpu/rtx_query.hpp"
 #include "core/gpu/rtx_shaders.hpp"
 #include "core/gpu/rtx_csg_groups.hpp"
 #include "core/gpu/rtx_instances.hpp"
@@ -228,30 +230,61 @@ public:
             }
 
             if (!group_mode_) {
-                auto shaders = gpu::emit_rt_shaders(scene, cfg_);
-                if (!shaders) { r.error = "gpu_rtx: " + shaders.error(); return r; }
-                std::string err = compile(shaders->rgen, "rgen", rgen_);
-                if (err.empty()) err = compile(shaders->rint,  "rint",  rint_);
-                if (err.empty()) err = compile(shaders->rchit, "rchit", rchit_);
-                if (err.empty()) err = compile(shaders->rmiss, "rmiss", rmiss_);
-                if (!err.empty()) { r.error = "gpu_rtx: compile: " + err; return r; }
-                tex_pixels_ = shaders->texture_pixels;
-                mesh_voxels_ = shaders->mesh_voxels;
-
                 // The same box the compute and IR paths clip their march to
                 // (scene_bounds.hpp), so the BVH gate and the intersection
                 // shader's clip agree with them. An unbounded scene keeps the
                 // old wide box.
                 FRepNode::AABB box{};
-                if (!scene_clip_box(scene, box)) {
+                const bool clipped = scene_clip_box(scene, box);
+                if (!clipped) {
                     box = scene_bounds(scene);
                     const float m = 0.05f;
                     box.min_x -= m; box.min_y -= m; box.min_z -= m;
                     box.max_x += m; box.max_y += m; box.max_z += m;
                 }
-                auto accel = gpu::RtAccel::build_whole_scene(*ctx_, box);
+                // Shell cells (rtx_cells.hpp): the acceleration structure is
+                // built over the cells the surface passes through, so the
+                // traversal unit skips the empty space a single box would
+                // make the intersection shader march. Only for a bounded
+                // scene -- the wide box of an unbounded one has no useful
+                // subdivision. FREP_RTX_CELLS=<cells per axis> overrides the
+                // default; 1 restores the single box.
+                cell_stats_ = gpu::CellStats{};
+                const int depth = clipped ? rtx_cell_depth() : 0;
+                std::vector<gpu::RtAabb> boxes =
+                    gpu::shell_cells(scene, box, depth, &cell_stats_);
+                const bool cells = boxes.size() > 1;
+
+                // Two ways to reach the same structure: the ray-tracing
+                // pipeline (the march in an intersection shader) or a ray
+                // query from a compute shader (the march inline, the hardware
+                // consulted for the boxes). FREP_RTX_MODE=pipeline|query.
+                query_mode_ = rtx_query_mode() && ctx_->has_ray_query();
+                comp_.clear();
+                if (query_mode_) {
+                    auto src = gpu::emit_ray_query_compute(scene, cfg_, cells);
+                    if (!src) { query_mode_ = false; }   // mesh/texture: back to the pipeline
+                    else {
+                        std::string err = compile(*src, "comp", comp_);
+                        if (!err.empty()) { r.error = "gpu_rtx: compile: " + err; return r; }
+                    }
+                }
+                if (!query_mode_) {
+                    auto shaders = gpu::emit_rt_shaders(scene, cfg_, cells);
+                    if (!shaders) { r.error = "gpu_rtx: " + shaders.error(); return r; }
+                    std::string err = compile(shaders->rgen, "rgen", rgen_);
+                    if (err.empty()) err = compile(shaders->rint,  "rint",  rint_);
+                    if (err.empty()) err = compile(shaders->rchit, "rchit", rchit_);
+                    if (err.empty()) err = compile(shaders->rmiss, "rmiss", rmiss_);
+                    if (!err.empty()) { r.error = "gpu_rtx: compile: " + err; return r; }
+                    tex_pixels_ = shaders->texture_pixels;
+                    mesh_voxels_ = shaders->mesh_voxels;
+                }
+
+                auto accel = gpu::RtAccel::build(*ctx_, boxes);
                 if (!accel) { r.error = "gpu_rtx: " + accel.error(); return r; }
                 accel_ = std::make_unique<gpu::RtAccel>(std::move(*accel));
+                cells_ = cells ? (int)boxes.size() : 0;
             }
 
             scene_key_ = skey;
@@ -270,14 +303,19 @@ public:
         //    interactive camera move pays only the trace.
         //    The frame comes back as the rgba8 the image holds unless the
         //    caller asked for floats (TracerConfig::output_format).
+        //    A float request also makes the frame image rgba32f (the shaders
+        //    were emitted for it), so the floats come back unquantised.
         const bool want8 = cfg_.output_format != TracerConfig::OutputFormat::Float;
+        const bool fimg  = !want8;
         auto img = group_mode_
             ? gpu::rtx_trace_groups_cached(*ctx_, *accel_, cache_,
                                            rgen_, rints_group_, rchits_group_,
-                                           rmiss_, rmiss_shadow_, pc, W, H, want8)
+                                           rmiss_, rmiss_shadow_, pc, W, H, want8, fimg)
+            : query_mode_
+            ? gpu::rtx_query_trace_cached(*ctx_, *accel_, cache_, comp_, pc, W, H, want8, fimg)
             : gpu::rtx_trace_cached(*ctx_, *accel_, cache_,
                                     rgen_, rint_, rchit_, rmiss_,
-                                    pc, W, H, tex_pixels_, mesh_voxels_, want8);
+                                    pc, W, H, tex_pixels_, mesh_voxels_, want8, fimg);
         if (!img) { r.error = "gpu_rtx: " + img.error(); return r; }
         auto pt_trace = pclk::now();
 
@@ -311,21 +349,26 @@ public:
             auto d = [](pclk::time_point a, pclk::time_point b) {
                 return std::chrono::duration<double, std::milli>(b - a).count();
             };
-            char mode[48];
+            char mode[80];
             if (inst_places_)
                 std::snprintf(mode, sizeof(mode), "instanced %d proto/%d inst",
                               inst_protos_, inst_places_);
+            else if (cells_)
+                std::snprintf(mode, sizeof(mode), "%s cells %d of %d^3 (%.1f ms)",
+                              query_mode_ ? "query" : "sbt",
+                              cells_, 1 << cell_stats_.depth, cell_stats_.ms);
             else
                 std::snprintf(mode, sizeof(mode), "%s",
-                              group_mode_ ? "groups" : "single");
+                              group_mode_ ? "groups" : query_mode_ ? "query single" : "single");
             std::fprintf(stderr,
                 "[rtx-prof %s] wall=%.2f  rebuild=%.2f  trace_call=%.2f  crop=%.2f"
-                "   | inside trace: setup(pipeline_ms)=%.2f trace(trace_ms)=%.2f "
-                "readback=%.2f (alloc %.2f)\n",
+                "   | inside trace: setup(pipeline_ms)=%.2f trace(trace_ms)=%.3f "
+                "[gpu trace %.3f copy %.3f] readback=%.2f (alloc %.2f)\n",
                 mode,
                 d(pt0, pt_crop), d(pt0, pt_rebuild), d(pt_rebuild, pt_trace),
                 d(pt_trace, pt_crop),
-                img->pipeline_ms, img->trace_ms, img->readback_ms, img->readback_alloc_ms);
+                img->pipeline_ms, img->trace_ms, img->gpu_trace_ms, img->gpu_copy_ms,
+                img->readback_ms, img->readback_alloc_ms);
         }
         return r;
     }
@@ -356,6 +399,31 @@ private:
         return scene.content_hash(/*with_lights=*/false);
     }
 
+    // FREP_RTX_MODE=query runs the single-field trace as a ray query from a
+    // compute shader (rtx_query.hpp); anything else (the default) keeps the
+    // ray-tracing pipeline.
+    static bool rtx_query_mode() {
+        static const bool q = [] {
+            const char* s = std::getenv("FREP_RTX_MODE");
+            return s && std::strcmp(s, "query") == 0;
+        }();
+        return q;
+    }
+
+    // Octree depth of the shell-cell build: 2^depth cells per axis.
+    // FREP_RTX_CELLS gives the cells per axis (rounded down to a power of two,
+    // 1 = the single whole-scene box); unset, kRtxCellsDefault.
+    static int rtx_cell_depth() {
+        static const int depth = [] {
+            int n = kRtxCellsDefault;
+            if (const char* s = std::getenv("FREP_RTX_CELLS")) n = std::atoi(s);
+            int d = 0;
+            while ((2 << d) <= n && d < 8) ++d;
+            return n <= 1 ? 0 : d;
+        }();
+        return depth;
+    }
+
 private:
     TracerConfig  cfg_;
     bool          allow_software_;
@@ -377,6 +445,21 @@ private:
     // Non-zero when the multi-BLAS build came from shared prototypes rather
     // than one-BLAS-per-member; the ratio is what the instancing bought.
     int                            inst_protos_ = 0, inst_places_ = 0;
+    // Shell-cell build (rtx_cells.hpp): how many cells the single-BLAS
+    // structure holds (0 = one box) and the statistics of the walk.
+    int                            cells_ = 0;
+    gpu::CellStats                 cell_stats_{};
+    // Ray-query mode (FREP_RTX_MODE=query): the compute SPIR-V that marches
+    // inline against the structure, in place of the four RT stages.
+    bool                           query_mode_ = false;
+    std::vector<std::uint32_t>     comp_;
+    // Cells per axis when FREP_RTX_CELLS is unset: one, the single box. The
+    // cells were measured at 8–64 per axis on every benchmark scene and never
+    // paid: each cell a ray enters is another traversal and another shader
+    // invocation, and on these fields that costs more than the march it
+    // saves (docs/PERFORMANCE_TUNING.md has the numbers). The machinery stays
+    // for fields where the march is the expensive part.
+    static constexpr int           kRtxCellsDefault = 1;
     std::vector<std::uint32_t>     tex_pixels_;
     std::vector<float>             mesh_voxels_;
     std::uint64_t                  scene_key_ = 0;

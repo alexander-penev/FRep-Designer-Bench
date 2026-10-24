@@ -55,6 +55,11 @@ struct RtRenderResult {
     double trace_ms    = 0.0;  // vkCmdTraceRaysKHR submit→fence (the real work)
     double readback_ms = 0.0;  // image → host buffer copy + map
     double readback_alloc_ms = 0.0;  // of which: sizing the result vector
+    // GPU-side split of trace_ms from timestamp queries, when profiling
+    // (FREP_RTX_PROFILE=1): the trace itself, and the image-to-buffer copy
+    // that follows it. -1 when not measured.
+    double gpu_trace_ms = -1.0;
+    double gpu_copy_ms  = -1.0;
 };
 
 // Build the pipeline once per (shader set) and render. We keep it
@@ -151,6 +156,7 @@ struct RtxPipelineCache {
     void*         frame_readback_mem = nullptr;// VkDeviceMemory
     void*         frame_readback_mapped = nullptr; // persistent host map of it
     int           frame_w = 0, frame_h = 0;    // extent the above were built for
+    bool          frame_float = false;         // rgba32f image (float output) or rgba8
 
     // Per-frame Vulkan objects that do not actually change between frames: the
     // descriptor pool and set (bound to the TLAS and the cached output image),
@@ -159,6 +165,8 @@ struct RtxPipelineCache {
     // reset and re-recorded each frame while the objects themselves persist.
     // Creating them per frame cost ~0.26 ms, which is a third of a frame once
     // the trace itself is under a millisecond.
+    void*         frame_query_pool = nullptr;  // VkQueryPool, 3 timestamps (profiling only)
+    float         timestamp_period_ns = 0.0f;  // device timestamp tick
     void*         frame_desc_pool = nullptr;   // VkDescriptorPool
     void*         frame_desc_set = nullptr;    // VkDescriptorSet
     void*         frame_cmd_pool = nullptr;    // VkCommandPool
@@ -175,6 +183,10 @@ struct RtxPipelineCache {
 // + SBT when the shader set matches (rebuilding only on a shader change). Pass
 // the same cache object across frames of an interactive session. With a warm
 // cache, pipeline_ms drops to ~0 and only trace_ms + readback_ms recur.
+//
+// `float_image`: the shaders were emitted for an rgba32f frame image
+// (TracerConfig::output_format == Float), so the frame is read back as the
+// GPU's floats; otherwise the image is rgba8 and a float request widens it.
 std::expected<RtRenderResult, std::string>
 rtx_trace_cached(const RtxCtx& ctx, const RtAccel& accel,
                  RtxPipelineCache& cache,
@@ -185,7 +197,7 @@ rtx_trace_cached(const RtxCtx& ctx, const RtAccel& accel,
                  const RtPushConstants& pc, int width, int height,
                  const std::vector<std::uint32_t>& texture_pixels = {},
                  const std::vector<float>& mesh_voxels = {},
-                 bool want_rgba8 = false);
+                 bool want_rgba8 = false, bool float_image = false);
 
 // Cached variant of rtx_trace_groups: reuses the multi-BLAS pipeline + SBT +
 // shader modules from `cache` while the group shader set is unchanged (only the
@@ -200,6 +212,6 @@ rtx_trace_groups_cached(const RtxCtx& ctx, const RtAccel& accel,
                         const std::vector<std::uint32_t>& rmiss,
                         const std::vector<std::uint32_t>& rmiss_shadow,
                         const RtPushConstants& pc, int width, int height,
-                        bool want_rgba8 = false);
+                        bool want_rgba8 = false, bool float_image = false);
 
 }  // namespace frep::gpu

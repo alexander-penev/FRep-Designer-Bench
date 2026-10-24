@@ -50,6 +50,15 @@ struct RenderParams {
 
 class TileScheduler {
 public:
+    // Run `job` on `n_threads` of the process pool (the calling thread is one
+    // of them) and return when all have finished. For a caller with a frame's
+    // worth of per-pixel work outside render(), such as the CPU executor
+    // quantising a float frame to bytes, which single-threaded took longer
+    // than the render it followed.
+    static void run_parallel(int n_threads, const std::function<void()>& job) {
+        pool().run(std::max(1, n_threads), job);
+    }
+
     // Renders `cam` into `out_rgba` using the JIT'd render_tile.
     //
     // `params` is an optional float buffer for Incremental compilation
@@ -128,14 +137,24 @@ public:
         // Tile granularity. A 512² frame in 64-px tiles is 64 tiles for 56
         // threads: the frame then takes as long as the slowest tile, and the
         // measured scaling collapsed past 16 threads (24–45% of the machine
-        // at 56). Halve the tile until there are at least four per thread, so
-        // the tail at the end of the frame is one small tile, not a large one.
-        // The floor of 16 px keeps the per-tile call overhead negligible.
+        // at 56). Halve the tile until there are at least sixteen per thread,
+        // so the tail at the end of the frame is one small tile, not a large
+        // one. Four per thread was enough while every tile cost about the
+        // same; the ray-box clip makes a sky tile free, so the frame's work
+        // sits in the handful of tiles the object covers and the frame is
+        // once more the single densest tile — and that tile runs on a core
+        // the governor has let idle down, since the clip left the rest of the
+        // machine with nothing to do (the twisted bar's densest 32-px tile
+        // took 3.2 ms on such a core against 1.0 ms on a busy one, and the
+        // whole clipped frame was slower than the unclipped one at 56
+        // threads). At 16 px that tile is four tiles on four cores: 0.7 ms
+        // for the frame instead of 3.6, and every unclipped scene also gains
+        // a little. 8 px measured the same as 16, so the floor stays.
         int tile = std::max(1, p.tile_size);
         auto tile_count = [&](int ts) {
             return (long)((rx1 - rx0 + ts - 1) / ts) * ((ry1 - ry0 + ts - 1) / ts);
         };
-        while (tile > 16 && tile_count(tile) < 4L * n_threads) tile /= 2;
+        while (tile > 16 && tile_count(tile) < 16L * n_threads) tile /= 2;
         for (int ty = ry0; ty < ry1; ty += tile)
             for (int tx = rx0; tx < rx1; tx += tile)
                 tiles.push_back({

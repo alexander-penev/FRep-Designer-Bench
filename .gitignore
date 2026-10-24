@@ -19,3 +19,6 @@
 
 # Downloaded installers (e.g. the CUDA local repo package) — never part of the suite.
 *.deb
+
+# A second build tree used while a subagent builds in build_render.
+frep4_bench/build_r3/

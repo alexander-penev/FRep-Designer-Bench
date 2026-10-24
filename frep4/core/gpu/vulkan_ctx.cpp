@@ -113,6 +113,10 @@ struct VulkanCtx::Impl {
     VkCommandPool         cmd_pool      = VK_NULL_HANDLE;
     VkCommandBuffer       cmd_buf       = VK_NULL_HANDLE;
     VkFence               fence         = VK_NULL_HANDLE;
+    // Three timestamps per frame (before the dispatch, after it, after the
+    // copy), recorded and read only under FREP_EXEC_PROFILE.
+    VkQueryPool           query_pool    = VK_NULL_HANDLE;
+    float                 ts_period_ns  = 0.0f;
 
     // Per-render objects — recreated when size changes.
     int           image_w = 0, image_h = 0;
@@ -151,6 +155,9 @@ struct VulkanCtx::Impl {
     bool           has_param_buffer = false;
 
     std::string device_name;
+    // The frame image is rgba32f (and the staging buffer 16 bytes a pixel)
+    // when the shader was emitted for float output; rgba8 otherwise.
+    bool        float_image = false;
 
     ~Impl() {
         if (device != VK_NULL_HANDLE) {
@@ -167,6 +174,7 @@ struct VulkanCtx::Impl {
             if (image_view)   vkDestroyImageView(device, image_view, nullptr);
             if (image_mem)    vkFreeMemory(device, image_mem, nullptr);
             if (image)        vkDestroyImage(device, image, nullptr);
+            if (query_pool)   vkDestroyQueryPool(device, query_pool, nullptr);
             if (fence)        vkDestroyFence(device, fence, nullptr);
             if (cmd_pool)     vkDestroyCommandPool(device, cmd_pool, nullptr);
             if (desc_pool)    vkDestroyDescriptorPool(device, desc_pool, nullptr);
@@ -192,10 +200,12 @@ struct VulkanCtx::Impl {
         if (image)       { vkDestroyImage(device, image, nullptr);          image      = VK_NULL_HANDLE; }
         image_w = w; image_h = h;
 
+        const VkFormat fmt = float_image ? VK_FORMAT_R32G32B32A32_SFLOAT
+                                         : VK_FORMAT_R8G8B8A8_UNORM;
         VkImageCreateInfo ici{};
         ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ici.imageType     = VK_IMAGE_TYPE_2D;
-        ici.format        = VK_FORMAT_R8G8B8A8_UNORM;
+        ici.format        = fmt;
         ici.extent        = { static_cast<std::uint32_t>(w),
                               static_cast<std::uint32_t>(h), 1 };
         ici.mipLevels     = 1;
@@ -225,14 +235,14 @@ struct VulkanCtx::Impl {
         vci.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         vci.image    = image;
         vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        vci.format   = VK_FORMAT_R8G8B8A8_UNORM;
+        vci.format   = fmt;
         vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         vci.subresourceRange.levelCount = 1;
         vci.subresourceRange.layerCount = 1;
         VK_TRY(vkCreateImageView(device, &vci, nullptr, &image_view));
 
-        // Staging buffer (host visible, transfer dst).
-        VkDeviceSize sz = static_cast<VkDeviceSize>(w) * h * 4;
+        // Staging buffer (host visible, transfer dst), one frame of the image.
+        VkDeviceSize sz = static_cast<VkDeviceSize>(w) * h * (float_image ? 16 : 4);
         if (staging_mapped) { vkUnmapMemory(device, staging_mem); staging_mapped = nullptr; }
         if (staging_mem) { vkFreeMemory(device, staging_mem, nullptr); staging_mem = VK_NULL_HANDLE; }
         if (staging)     { vkDestroyBuffer(device, staging, nullptr); staging = VK_NULL_HANDLE; }
@@ -318,13 +328,15 @@ std::expected<std::unique_ptr<VulkanCtx>, std::string>
 VulkanCtx::create(const std::string& spv_path,
                   const std::vector<float>& mesh_voxels,
                   const std::vector<std::uint8_t>& texture_pixels,
-                  const std::vector<float>& params)
+                  const std::vector<float>& params,
+                  bool float_image)
 {
     auto t0 = std::chrono::steady_clock::now();
 
     auto ctx = std::unique_ptr<VulkanCtx>(new VulkanCtx());
     ctx->impl_ = std::make_unique<Impl>();
     Impl& I    = *ctx->impl_;
+    I.float_image = float_image;
 
     // 1. Instance.
     {
@@ -365,6 +377,7 @@ VulkanCtx::create(const std::string& spv_path,
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(I.physical_device, &props);
         I.device_name = props.deviceName;
+        I.ts_period_ns = props.limits.timestampPeriod;
         // Stay on the socket the card hangs off: the thread that submits and
         // reads frames back, and the host memory the driver allocates for it
         // from here on, both land on the card's NUMA node (see gpu_numa.hpp).
@@ -637,6 +650,15 @@ VulkanCtx::create(const std::string& spv_path,
         VkFenceCreateInfo fi{};
         fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         VK_TRY(vkCreateFence(I.device, &fi, nullptr, &I.fence));
+
+        if (std::getenv("FREP_EXEC_PROFILE")) {
+            VkQueryPoolCreateInfo qci{};
+            qci.sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            qci.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+            qci.queryCount = 3;
+            if (vkCreateQueryPool(I.device, &qci, nullptr, &I.query_pool) != VK_SUCCESS)
+                I.query_pool = VK_NULL_HANDLE;   // profiling detail; never fatal
+        }
     }
 
     auto t1 = std::chrono::steady_clock::now();
@@ -656,21 +678,28 @@ VulkanCtx::~VulkanCtx() = default;
 // ─────────────────────────────────────────────────────────────────────────────
 // render()
 // ─────────────────────────────────────────────────────────────────────────────
+// The sinks receive the staging bytes and the channel count (pixels × 4);
+// each hands the frame over in the caller's form, converting only when the
+// image's format is not the one asked for.
 std::expected<void, std::string>
 VulkanCtx::render(const ShaderPush& push, std::vector<std::uint8_t>& out_rgba)
 {
+    const bool fimg = impl_->float_image;
     return render_impl(push, [&](const std::uint8_t* src, std::size_t n) {
         out_rgba.resize(n);
-        std::memcpy(out_rgba.data(), src, n);
+        if (fimg) pack_rgba8(reinterpret_cast<const float*>(src), out_rgba.data(), n);
+        else      std::memcpy(out_rgba.data(), src, n);
     });
 }
 
 std::expected<void, std::string>
 VulkanCtx::render(const ShaderPush& push, std::vector<float>& out_rgba)
 {
+    const bool fimg = impl_->float_image;
     return render_impl(push, [&](const std::uint8_t* src, std::size_t n) {
         out_rgba.resize(n);
-        unpack_rgba8(src, out_rgba.data(), n);
+        if (fimg) std::memcpy(out_rgba.data(), src, n * sizeof(float));
+        else      unpack_rgba8(src, out_rgba.data(), n);
     });
 }
 
@@ -695,6 +724,8 @@ VulkanCtx::render_impl(const ShaderPush& push, Sink&& sink)
     VkCommandBufferBeginInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     VK_TRY(vkBeginCommandBuffer(I.cmd_buf, &bi));
+    const VkQueryPool qpool = I.query_pool;   // non-null only under FREP_EXEC_PROFILE
+    if (qpool) vkCmdResetQueryPool(I.cmd_buf, qpool, 0, 3);
 
     // Image transition: UNDEFINED -> GENERAL (for storage image writes).
     {
@@ -728,7 +759,9 @@ VulkanCtx::render_impl(const ShaderPush& push, Sink&& sink)
     int tile_h = (push.tile_y1 > 0 ? push.tile_y1 : h) - push.tile_y0;
     if (tile_w <= 0) tile_w = w;
     if (tile_h <= 0) tile_h = h;
+    if (qpool) vkCmdWriteTimestamp(I.cmd_buf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, 0);
     vkCmdDispatch(I.cmd_buf, (tile_w + 7) / 8, (tile_h + 7) / 8, 1);
+    if (qpool) vkCmdWriteTimestamp(I.cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 1);
 
     // Transition GENERAL -> TRANSFER_SRC_OPTIMAL.
     {
@@ -771,6 +804,7 @@ VulkanCtx::render_impl(const ShaderPush& push, Sink&& sink)
                                         static_cast<std::uint32_t>(th), 1 };
     vkCmdCopyImageToBuffer(I.cmd_buf, I.image,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, I.staging, 1, &bic);
+    if (qpool) vkCmdWriteTimestamp(I.cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 2);
 
     VK_TRY(vkEndCommandBuffer(I.cmd_buf));
 
@@ -785,12 +819,22 @@ VulkanCtx::render_impl(const ShaderPush& push, Sink&& sink)
     VK_TRY(vkQueueSubmit(I.compute_queue, 1, &si, I.fence));
     VK_TRY(wait_fence(I.device, I.fence, spin_budget_ms(stats_.gpu_wait_ms)));
     auto t_done = std::chrono::steady_clock::now();
+    stats_.gpu_dispatch_ms = stats_.gpu_copy_ms = -1;
+    if (qpool) {
+        std::uint64_t ts[3] = {0, 0, 0};
+        if (vkGetQueryPoolResults(I.device, qpool, 0, 3, sizeof(ts), ts,
+                                  sizeof(ts[0]), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            const double k = I.ts_period_ns * 1e-6;   // ticks → ms
+            stats_.gpu_dispatch_ms = (double)(ts[1] - ts[0]) * k;
+            stats_.gpu_copy_ms     = (double)(ts[2] - ts[1]) * k;
+        }
+    }
 
     // Map and hand over. The staging buffer holds the tile tightly packed, so
-    // the caller's buffer is tile-sized (tw*th*4) — equal to the full frame
-    // when no tile was requested.
-    std::size_t expected_size = static_cast<std::size_t>(tw) * th * 4;
-    sink(static_cast<const std::uint8_t*>(I.staging_mapped), expected_size);
+    // the caller's buffer is tile-sized (tw*th*4 channels) — equal to the
+    // full frame when no tile was requested.
+    std::size_t channels = static_cast<std::size_t>(tw) * th * 4;
+    sink(static_cast<const std::uint8_t*>(I.staging_mapped), channels);
 
     auto t1 = std::chrono::steady_clock::now();
     using ms = std::chrono::duration<double, std::milli>;

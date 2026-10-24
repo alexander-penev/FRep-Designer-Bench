@@ -9,8 +9,8 @@ in the manuscript can be traced to a run rather than to someone's terminal.
 |---|---|
 | `render_512.csv` | Full-frame render at 512², all four paths — the FRep Designer columns of the cross-system render table. `ms` is wall-clock per frame; `build_ms` and `run_ms` separate the one-time setup from the recurring dispatch. |
 | `render_scaling.csv` | The same at 400/800/1280 — the CPU-vs-GPU table and the speed-up-by-resolution figure. |
-| `hetero_tilequeue.csv` | CPU_IR and GPU_GLSL sharing one tile queue at 800²: throughput and measured energy for each device alone and composed — under the plain queue (`hetero_plain`) and under the fastest-takes-the-tail rule (`hetero_tail`, the default). Medians of five interleaved rounds; each run lasts at least 500 ms so NVML resolves it. |
-| `rtx_instances.txt` | GPU_RTX multi-BLAS vs CPU_IR on a grid of N separable spheres, with NVML/RAPL energy — the instance-scaling table and figure. |
+| `hetero_tilequeue.csv` | CPU_IR and GPU_GLSL sharing one tile queue at 800² over 128-px cells: throughput and measured energy for each device alone (under the guided policy, its best in this harness) and composed under each queue policy — the plain queue (`hetero_plain`), the fastest-takes-the-tail rule (`hetero_tail`) and the speed-weighted guided chunking (`hetero_guided`, the default). Medians of five interleaved rounds; each run lasts at least 500 ms so NVML resolves it. |
+| `rtx_instances.txt`, `rtx_instances_factor.txt` | GPU_RTX vs CPU_IR on a grid of N separable spheres at 1024², with NVML/RAPL energy — the instance-scaling table and figure. The first file is the per-member construction (one bottom-level structure per union member), the second the instanced one (one per shared prototype, placed by transforms); the CPU column is from the same runs. |
 | `grid_193.csv` | Raw SDF-evaluation throughput on the shared 193³ grid — the FRep Designer column of the cross-system grid table. |
 
 The other systems (HyperFun, libfive, mpr) are measured by `run_all.sh`, which

@@ -115,7 +115,8 @@ public:
                 auto spv = gpu::compile_glsl_to_spv_managed(emit->source);
                 if (!spv) { r.error = "spirv: " + spv.error(); return r; }
                 auto ctx_or = gpu::VulkanCtx::create(
-                    spv->path(), emit->mesh_voxels, emit->texture_pixels, pbuf);
+                    spv->path(), emit->mesh_voxels, emit->texture_pixels, pbuf,
+                    cfg.output_format == TracerConfig::OutputFormat::Float);
                 if (!ctx_or) { r.error = "vulkan ctx create failed"; return r; }
                 ctx_ = std::move(*ctx_or);
                 cached_glsl_ = emit->source;
@@ -157,9 +158,10 @@ public:
 
         if (profile_enabled())
             std::fprintf(stderr, "gpu_glsl-prof: %-5s compile=%.3f run=%.3f "
-                "(record %.3f wait %.3f readback %.3f) total=%.3f ms\n",
+                "(record %.3f wait %.3f [gpu dispatch %.3f copy %.3f] readback %.3f) total=%.3f ms\n",
                 reuse ? "reuse" : "emit", r.compile_ms, r.render_ms,
-                st.record_ms, st.gpu_wait_ms, st.readback_ms,
+                st.record_ms, st.gpu_wait_ms, st.gpu_dispatch_ms, st.gpu_copy_ms,
+                st.readback_ms,
                 std::chrono::duration<double, std::milli>(clk::now() - t_c).count());
         return r;
     }

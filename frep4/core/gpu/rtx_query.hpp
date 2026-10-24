@@ -41,8 +41,12 @@ namespace frep::gpu {
 // ray (identical formula to the SBT raygen), rayQueryEXT against the TLAS,
 // sphere-trace scene_sdf inside the candidate AABB, then scene_normal + shade —
 // byte-identical to the SBT intersection+closest-hit, only the stage differs.
+// With `cells` the candidate boxes are the field's shell cells (rtx_cells.hpp),
+// read from the box list bound at binding 2; otherwise the march is clipped to
+// the whole-scene box exactly as the compute path clips it.
 std::expected<std::string, std::string>
-emit_ray_query_compute(const SceneGraph& scene, const TracerConfig& cfg);
+emit_ray_query_compute(const SceneGraph& scene, const TracerConfig& cfg,
+                       bool cells = false);
 
 // Trace via the ray-query compute pipeline against `accel` (reuse the SAME TLAS
 // the SBT path builds — this is an apples-to-apples pipeline swap). `comp` is
@@ -52,5 +56,19 @@ std::expected<RtRenderResult, std::string>
 rtx_query_trace(const RtxCtx& ctx, const RtAccel& accel,
                 const std::vector<std::uint32_t>& comp,
                 const RtPushConstants& pc, int width, int height);
+
+// The cached ray-query trace: the counterpart of rtx_trace_cached for the
+// compute pipeline. The pipeline, layouts and module live in `cache` while the
+// SPIR-V is unchanged, and the frame resources (image, readback, command
+// buffer, descriptor set, fence) are reused across frames exactly as the SBT
+// path reuses them, so the two can be compared frame for frame. The box list
+// is bound at binding 2 when `accel` holds shell cells. Defined next to the
+// SBT trace (rtx_pipeline.cpp) because it shares its frame-resource helpers.
+std::expected<RtRenderResult, std::string>
+rtx_query_trace_cached(const RtxCtx& ctx, const RtAccel& accel,
+                       RtxPipelineCache& cache,
+                       const std::vector<std::uint32_t>& comp,
+                       const RtPushConstants& pc, int width, int height,
+                       bool want_rgba8 = false, bool float_image = false);
 
 }  // namespace frep::gpu

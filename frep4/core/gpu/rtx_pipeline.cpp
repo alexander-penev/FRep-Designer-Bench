@@ -10,6 +10,7 @@
 //   6. vkCmdTraceRaysKHR, then copy image → host-visible buffer → floats
 
 #include "core/gpu/rtx_pipeline.hpp"
+#include "core/gpu/rtx_query.hpp"
 #include "core/gpu/rgba_unpack.hpp"
 #include "core/gpu/vk_fence_wait.hpp"
 #include "core/tracer/pixel_buffers.hpp"
@@ -105,10 +106,11 @@ struct FrameRT {
 
 std::expected<FrameRT, std::string>
 acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
-                 int width, int height, bool cacheable) {
+                 int width, int height, bool cacheable, bool float_image) {
     auto dev = ctx.device();
     if (cache && cacheable && cache->frame_image &&
-        cache->frame_w == width && cache->frame_h == height) {
+        cache->frame_w == width && cache->frame_h == height &&
+        cache->frame_float == float_image) {
         FrameRT f;
         f.image        = (VkImage)cache->frame_image;
         f.image_mem    = (VkDeviceMemory)cache->frame_image_mem;
@@ -131,11 +133,15 @@ acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
         cache->frame_readback = cache->frame_readback_mem = cache->frame_readback_mapped = nullptr;
     }
 
+    // rgba8 unless the shaders were emitted for a float frame (the caller
+    // asked for floats): then rgba32f, four times the bytes, no quantisation.
+    const VkFormat fmt = float_image ? VK_FORMAT_R32G32B32A32_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM;
+    const VkDeviceSize bpp = float_image ? 16 : 4;
     FrameRT f;
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.format = fmt;
     ici.extent = { (std::uint32_t)width, (std::uint32_t)height, 1 };
     ici.mipLevels = 1; ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -158,13 +164,13 @@ acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
     VkImageViewCreateInfo ivci{};
     ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     ivci.image = f.image; ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.format = fmt;
     ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vkCreateImageView(dev, &ivci, nullptr, &f.view);
 
-    // Sized for the rgba8 image it receives; it was sized for rgba32f long
-    // after the image stopped being one, four times what is copied into it.
-    auto rb = mk_readback_buf(ctx, (VkDeviceSize)width * height * 4);
+    // Sized for the image it receives (it was once sized for rgba32f long
+    // after the image had stopped being one).
+    auto rb = mk_readback_buf(ctx, (VkDeviceSize)width * height * bpp);
     if (!rb) return std::unexpected(rb.error());
     f.readback = rb->buf; f.readback_mem = rb->mem;
 
@@ -177,9 +183,30 @@ acquire_frame_rt(const RtxCtx& ctx, RtxPipelineCache* cache,
         cache->frame_readback_mem = f.readback_mem;
         cache->frame_readback_mapped = f.mapped;
         cache->frame_w = width; cache->frame_h = height;
+        cache->frame_float = float_image;
         f.cached = true;   // stored in cache → don't tear down per frame
     }
     return f;
+}
+
+// Hand the mapped frame over in the form the caller asked for: the image's
+// own bytes or floats when the request matches it, a conversion otherwise.
+void read_frame(const void* p, int width, int height, bool float_image,
+                bool want_rgba8, RtRenderResult& out) {
+    const std::size_t n = (std::size_t)width * height * 4;   // channels
+    auto t_alloc0 = std::chrono::steady_clock::now();
+    // Recycled (pixel_buffers.hpp): sized without zeroing, overwritten below.
+    if (want_rgba8) out.rgba8 = take_bytes(n);
+    else            out.rgba  = take_floats(n);
+    out.readback_alloc_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_alloc0).count();
+    if (float_image) {
+        if (want_rgba8) pack_rgba8(static_cast<const float*>(p), out.rgba8.data(), n);
+        else            std::memcpy(out.rgba.data(), p, n * sizeof(float));
+    } else {
+        if (want_rgba8) std::memcpy(out.rgba8.data(), p, n);
+        else unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), n);
+    }
 }
 
 
@@ -264,16 +291,30 @@ inline std::uint64_t shader_set_key(const std::vector<std::uint32_t>& rgen,
                                     const std::vector<std::uint32_t>& rint,
                                     const std::vector<std::uint32_t>& rchit,
                                     const std::vector<std::uint32_t>& rmiss,
-                                    bool has_tex, bool has_mesh) {
+                                    unsigned binding_flags) {
     std::uint64_t h = 1469598103934665603ull;
     auto mix = [&](const std::vector<std::uint32_t>& v) {
         h ^= v.size(); h *= 1099511628211ull;
         for (std::uint32_t w : v) { h ^= w; h *= 1099511628211ull; }
     };
     mix(rgen); mix(rint); mix(rchit); mix(rmiss);
-    h ^= (has_tex ? 2u : 0u) | (has_mesh ? 1u : 0u);
+    h ^= binding_flags;
     h *= 1099511628211ull;
     return h;
+}
+
+// GPU timestamps around the trace and the copy, read when profiling
+// (FREP_RTX_PROFILE=1). The fence time a frame otherwise reports is the
+// submit-to-signal span, which holds the trace, the image-to-buffer copy
+// across PCIe and the queue's own latency; only the first of those is the
+// ray tracing, and at 512² it is the smaller part. Three queries: before the
+// trace, after it, after the copy.
+inline bool rtx_profile_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("FREP_RTX_PROFILE");
+        return v && v[0] == '1';
+    }();
+    return on;
 }
 
 }  // namespace
@@ -302,6 +343,8 @@ void RtxPipelineCache::release(const RtxCtx& ctx) {
     if (frame_fence)     vkDestroyFence(dev, (VkFence)frame_fence, nullptr);
     if (frame_cmd_pool)  vkDestroyCommandPool(dev, (VkCommandPool)frame_cmd_pool, nullptr);
     if (frame_desc_pool) vkDestroyDescriptorPool(dev, (VkDescriptorPool)frame_desc_pool, nullptr);
+    if (frame_query_pool) vkDestroyQueryPool(dev, (VkQueryPool)frame_query_pool, nullptr);
+    frame_query_pool = nullptr;
     frame_fence = frame_cmd_pool = frame_cmd_buf = nullptr;
     frame_desc_pool = frame_desc_set = nullptr; frame_tlas = nullptr;
     frame_image = frame_image_mem = frame_image_view = nullptr;
@@ -326,10 +369,17 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
                const std::vector<std::uint32_t>& rmiss,
                const RtPushConstants& pc, int width, int height,
                const std::vector<std::uint32_t>& texture_pixels,
-               const std::vector<float>& mesh_voxels, bool want_rgba8) {
+               const std::vector<float>& mesh_voxels, bool want_rgba8,
+               bool float_image) {
     auto dev = ctx.device();
     const bool has_tex  = !texture_pixels.empty();
     const bool has_mesh = !mesh_voxels.empty();
+    // More than one box in the single-BLAS build means shell cells
+    // (rtx_cells.hpp): the intersection shader was emitted to read its cell
+    // from the box list, so that list is bound at binding 4.
+    const bool has_cells = accel.aabb_count() > 1 && accel.aabb_buffer();
+    const unsigned binding_flags =
+        (has_tex ? 2u : 0u) | (has_mesh ? 1u : 0u) | (has_cells ? 4u : 0u);
     using clk = std::chrono::steady_clock;
     auto ms = [](clk::time_point a, clk::time_point b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
@@ -345,11 +395,11 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     const std::vector<std::pair<const void*, std::size_t>> key_src = {
         {rgen.data(), rgen.size()}, {rint.data(), rint.size()},
         {rchit.data(), rchit.size()}, {rmiss.data(), rmiss.size()},
-        {nullptr, (has_tex ? 2u : 0u) | (has_mesh ? 1u : 0u)}};
+        {nullptr, (std::size_t)binding_flags}};
     const std::uint64_t want_key =
         (cache && cache->valid && cache->key_src == key_src)
             ? cache->key   // same blobs as the frame before: no rehash
-            : shader_set_key(rgen, rint, rchit, rmiss, has_tex, has_mesh);
+            : shader_set_key(rgen, rint, rchit, rmiss, binding_flags);
     const bool cache_hit = cache && cache->valid && cache->key == want_key;
     if (cache && cache->valid && cache->key != want_key)
         cache->release(ctx);  // different shaders → drop the stale build
@@ -420,9 +470,14 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     b3.stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                     VK_SHADER_STAGE_INTERSECTION_BIT_KHR |
                     VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    VkDescriptorSetLayoutBinding b4{};  // shell-cell box list (intersection)
+    b4.binding = 4; b4.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    b4.descriptorCount = 1;
+    b4.stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
     std::vector<VkDescriptorSetLayoutBinding> binds = {b0, b1};
-    if (has_tex)  binds.push_back(b2);
-    if (has_mesh) binds.push_back(b3);
+    if (has_tex)   binds.push_back(b2);
+    if (has_mesh)  binds.push_back(b3);
+    if (has_cells) binds.push_back(b4);
     VkDescriptorSetLayoutCreateInfo dslci{};
     dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     dslci.bindingCount = (std::uint32_t)binds.size(); dslci.pBindings = binds.data();
@@ -549,7 +604,7 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     // scenes; tex/mesh scenes keep the per-frame path. `frame_cached` gates the
     // per-frame teardown below.
     const bool frame_cacheable = !has_tex && !has_mesh;
-    auto frt = acquire_frame_rt(ctx, cache, width, height, frame_cacheable);
+    auto frt = acquire_frame_rt(ctx, cache, width, height, frame_cacheable, float_image);
     if (!frt) return std::unexpected(frt.error());
     VkImage        image      = frt->image;
     VkDeviceMemory image_mem  = frt->image_mem;
@@ -600,15 +655,17 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     } else {
         if (cache && cache->frame_desc_pool)
             vkDestroyDescriptorPool(dev, (VkDescriptorPool)cache->frame_desc_pool, nullptr);
-        VkDescriptorPoolSize ps[4]{};
+        // One storage-buffer entry sized for every buffer binding the layout
+        // may have (texture, mesh voxels, shell cells); an entry larger than
+        // what the set uses is allowed.
+        VkDescriptorPoolSize ps[3]{};
         ps[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; ps[0].descriptorCount = 1;
         ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; ps[1].descriptorCount = 1;
-        ps[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[2].descriptorCount = 1;
-        ps[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[3].descriptorCount = 1;
+        ps[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[2].descriptorCount = 3;
         VkDescriptorPoolCreateInfo dpci{};
         dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         dpci.maxSets = 1;
-        dpci.poolSizeCount = 2u + (has_tex ? 1u : 0u) + (has_mesh ? 1u : 0u);
+        dpci.poolSizeCount = 3;
         dpci.pPoolSizes = ps;
         vkCreateDescriptorPool(dev, &dpci, nullptr, &pool);
         VkDescriptorSetAllocateInfo dsai{};
@@ -657,8 +714,37 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
         w3.pBufferInfo = &dbi_m;
         writes.push_back(w3);
     }
+    VkDescriptorBufferInfo dbi_c{};
+    VkWriteDescriptorSet w4{};
+    if (has_cells) {
+        dbi_c.buffer = accel.aabb_buffer(); dbi_c.offset = 0; dbi_c.range = VK_WHOLE_SIZE;
+        w4.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w4.dstSet = dset; w4.dstBinding = 4;
+        w4.descriptorCount = 1; w4.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w4.pBufferInfo = &dbi_c;
+        writes.push_back(w4);
+    }
     if (!desc_cached)
         vkUpdateDescriptorSets(dev, (std::uint32_t)writes.size(), writes.data(), 0, nullptr);
+
+    // Timestamp queries (profiling only, cached frames only).
+    VkQueryPool qpool = VK_NULL_HANDLE;
+    if (rtx_profile_on() && cache && frame_cached) {
+        if (!cache->frame_query_pool) {
+            VkQueryPoolCreateInfo qci{};
+            qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qci.queryCount = 3;
+            VkQueryPool qp = VK_NULL_HANDLE;
+            if (vkCreateQueryPool(dev, &qci, nullptr, &qp) == VK_SUCCESS) {
+                cache->frame_query_pool = qp;
+                VkPhysicalDeviceProperties props{};
+                vkGetPhysicalDeviceProperties(ctx.physical_device(), &props);
+                cache->timestamp_period_ns = props.limits.timestampPeriod;
+            }
+        }
+        qpool = (VkQueryPool)cache->frame_query_pool;
+    }
 
     // ── Command buffer: layout transition, trace, copy to buffer ────────────
     VkCommandPool cpool = VK_NULL_HANDLE;
@@ -683,7 +769,7 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     }
 
     // readback buffer (from the cached frame resources)
-    VkDeviceSize img_bytes = (VkDeviceSize)width * height * 4;  // rgba8
+    VkDeviceSize img_bytes = (VkDeviceSize)width * height * (float_image ? 16 : 4);
     VkBuffer       rb_buf = frt->readback;
     VkDeviceMemory rb_mem = frt->readback_mem;
 
@@ -691,6 +777,7 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &bi);
+    if (qpool) vkCmdResetQueryPool(cmd, qpool, 0, 3);
 
     // UNDEFINED → GENERAL for storage write
     VkImageMemoryBarrier toGeneral{};
@@ -714,8 +801,10 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
                        VK_SHADER_STAGE_INTERSECTION_BIT_KHR |
                        VK_SHADER_STAGE_MISS_BIT_KHR,
                        0, sizeof(RtPushConstants), &pc);
+    if (qpool) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, 0);
     cmd_trace(cmd, &rgen_r, &miss_r, &hit_r, &call_r,
               (std::uint32_t)width, (std::uint32_t)height, 1);
+    if (qpool) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 1);
 
     // GENERAL → TRANSFER_SRC for copy
     VkImageMemoryBarrier toSrc = toGeneral;
@@ -732,6 +821,7 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     copy.imageExtent = { (std::uint32_t)width, (std::uint32_t)height, 1 };
     vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            rb_buf, 1, &copy);
+    if (qpool) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 2);
 
     vkEndCommandBuffer(cmd);
     VkSubmitInfo si{};
@@ -754,6 +844,15 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
     // ── Readback ────────────────────────────────────────────────────────────
     RtRenderResult out;
     out.width = width; out.height = height;
+    if (qpool) {
+        std::uint64_t ts[3] = {0, 0, 0};
+        if (vkGetQueryPoolResults(dev, qpool, 0, 3, sizeof(ts), ts, sizeof(ts[0]),
+                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            const double k = cache->timestamp_period_ns * 1e-6;   // ticks → ms
+            out.gpu_trace_ms = (double)(ts[1] - ts[0]) * k;
+            out.gpu_copy_ms  = (double)(ts[2] - ts[1]) * k;
+        }
+    }
     auto t_rb0 = clk::now();
     {
         // Cached frames keep their readback buffer mapped; the per-frame
@@ -762,14 +861,7 @@ rtx_trace_impl(const RtxCtx& ctx, const RtAccel& accel,
         void* p = frt->mapped;
         const bool transient = (p == nullptr);
         if (transient) vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
-        auto t_alloc0 = clk::now();
-        // Recycled (pixel_buffers.hpp): sized without zeroing, overwritten below.
-        if (want_rgba8) out.rgba8 = take_bytes((std::size_t)img_bytes);
-        else            out.rgba  = take_floats((std::size_t)width * height * 4);
-        out.readback_alloc_ms =
-            std::chrono::duration<double, std::milli>(clk::now() - t_alloc0).count();
-        if (want_rgba8) std::memcpy(out.rgba8.data(), p, (std::size_t)img_bytes);
-        else unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
+        read_frame(p, width, height, float_image, want_rgba8, out);
         if (transient) vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();
@@ -823,7 +915,7 @@ rtx_trace(const RtxCtx& ctx, const RtAccel& accel,
           const std::vector<std::uint32_t>& texture_pixels,
           const std::vector<float>& mesh_voxels) {
     return rtx_trace_impl(ctx, accel, nullptr, rgen, rint, rchit, rmiss,
-                          pc, width, height, texture_pixels, mesh_voxels, false);
+                          pc, width, height, texture_pixels, mesh_voxels, false, false);
 }
 
 std::expected<RtRenderResult, std::string>
@@ -835,9 +927,11 @@ rtx_trace_cached(const RtxCtx& ctx, const RtAccel& accel,
                  const std::vector<std::uint32_t>& rmiss,
                  const RtPushConstants& pc, int width, int height,
                  const std::vector<std::uint32_t>& texture_pixels,
-                 const std::vector<float>& mesh_voxels, bool want_rgba8) {
+                 const std::vector<float>& mesh_voxels, bool want_rgba8,
+                 bool float_image) {
     return rtx_trace_impl(ctx, accel, &cache, rgen, rint, rchit, rmiss,
-                          pc, width, height, texture_pixels, mesh_voxels, want_rgba8);
+                          pc, width, height, texture_pixels, mesh_voxels, want_rgba8,
+                          float_image);
 }
 
 static std::expected<RtRenderResult, std::string>
@@ -849,7 +943,7 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
                  const std::vector<std::uint32_t>& rmiss,
                  const std::vector<std::uint32_t>& rmiss_shadow,
                  const RtPushConstants& pc, int width, int height,
-                 bool want_rgba8) {
+                 bool want_rgba8, bool float_image) {
     auto dev = ctx.device();
     using clk = std::chrono::steady_clock;
     auto msf = [](clk::time_point a, clk::time_point b) {
@@ -1106,7 +1200,7 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
 
     // ── Output image (rgba32f storage) + readback buffer ────────────────────
     // Cached across frames (the group path is always analytic — no tex/mesh).
-    auto frt = acquire_frame_rt(ctx, cache, width, height, /*cacheable=*/true);
+    auto frt = acquire_frame_rt(ctx, cache, width, height, /*cacheable=*/true, float_image);
     if (!frt) return std::unexpected(frt.error());
     VkImage        image        = frt->image;
     VkDeviceMemory image_mem    = frt->image_mem;
@@ -1179,7 +1273,7 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
         if (cache && frame_cached) { cache->frame_cmd_pool = cpool; cache->frame_cmd_buf = cmd; }
     }
 
-    VkDeviceSize img_bytes = (VkDeviceSize)width * height * 4;  // rgba8
+    VkDeviceSize img_bytes = (VkDeviceSize)width * height * (float_image ? 16 : 4);
     VkBuffer       rb_buf = frt->readback;
     VkDeviceMemory rb_mem = frt->readback_mem;
 
@@ -1252,14 +1346,7 @@ rtx_trace_groups_impl(const RtxCtx& ctx, const RtAccel& accel,
         void* p = frt->mapped;
         const bool transient = (p == nullptr);
         if (transient) vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
-        auto t_alloc0 = clk::now();
-        // Recycled (pixel_buffers.hpp): sized without zeroing, overwritten below.
-        if (want_rgba8) out.rgba8 = take_bytes((std::size_t)img_bytes);
-        else            out.rgba  = take_floats((std::size_t)width * height * 4);
-        out.readback_alloc_ms =
-            std::chrono::duration<double, std::milli>(clk::now() - t_alloc0).count();
-        if (want_rgba8) std::memcpy(out.rgba8.data(), p, (std::size_t)img_bytes);
-        else unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
+        read_frame(p, width, height, float_image, want_rgba8, out);
         if (transient) vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();
@@ -1306,7 +1393,7 @@ rtx_trace_groups(const RtxCtx& ctx, const RtAccel& accel,
                  const RtPushConstants& pc, int width, int height) {
     return rtx_trace_groups_impl(ctx, accel, nullptr, rgen, rint_per_group,
                                  rchit_per_group, rmiss, rmiss_shadow,
-                                 pc, width, height, false);
+                                 pc, width, height, false, false);
 }
 
 std::expected<RtRenderResult, std::string>
@@ -1318,10 +1405,272 @@ rtx_trace_groups_cached(const RtxCtx& ctx, const RtAccel& accel,
                         const std::vector<std::uint32_t>& rmiss,
                         const std::vector<std::uint32_t>& rmiss_shadow,
                         const RtPushConstants& pc, int width, int height,
-                        bool want_rgba8) {
+                        bool want_rgba8, bool float_image) {
     return rtx_trace_groups_impl(ctx, accel, &cache, rgen, rint_per_group,
                                  rchit_per_group, rmiss, rmiss_shadow,
-                                 pc, width, height, want_rgba8);
+                                 pc, width, height, want_rgba8, float_image);
+}
+
+// ── Ray query: the compute-pipeline trace against the same structure ─────────
+//
+// Declared in rtx_query.hpp. The per-frame section is the SBT path's with a
+// compute dispatch where the trace was; the cache holds a compute pipeline in
+// the slots the RT pipeline would occupy, keyed by the compute blob alone.
+std::expected<RtRenderResult, std::string>
+rtx_query_trace_cached(const RtxCtx& ctx, const RtAccel& accel,
+                       RtxPipelineCache& cache_ref,
+                       const std::vector<std::uint32_t>& comp,
+                       const RtPushConstants& pc, int width, int height,
+                       bool want_rgba8, bool float_image) {
+    RtxPipelineCache* cache = &cache_ref;
+    auto dev = ctx.device();
+    if (!ctx.has_ray_query())
+        return std::unexpected("rtx_query: VK_KHR_ray_query not enabled on device");
+    const bool has_cells = accel.aabb_count() > 1 && accel.aabb_buffer();
+    const unsigned binding_flags = 8u | (has_cells ? 4u : 0u);   // 8: compute mode
+    using clk = std::chrono::steady_clock;
+    auto ms = [](clk::time_point a, clk::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    auto t_pipe0 = clk::now();
+
+    const std::vector<std::pair<const void*, std::size_t>> key_src = {
+        {comp.data(), comp.size()}, {nullptr, (std::size_t)binding_flags}};
+    const std::uint64_t want_key =
+        (cache->valid && cache->key_src == key_src)
+            ? cache->key
+            : shader_set_key(comp, {}, {}, {}, binding_flags);
+    const bool cache_hit = cache->valid && cache->key == want_key;
+    if (cache->valid && cache->key != want_key) cache->release(ctx);
+
+    VkShaderModule module = VK_NULL_HANDLE;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    VkPipelineLayout playout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (cache_hit) {
+        module   = (VkShaderModule)cache->shader_modules[0];
+        dsl      = (VkDescriptorSetLayout)cache->descriptor_layout;
+        playout  = (VkPipelineLayout)cache->pipeline_layout;
+        pipeline = (VkPipeline)cache->pipeline;
+    } else {
+        module = mk_module(dev, comp);
+        VkDescriptorSetLayoutBinding binds[3]{};
+        binds[0].binding = 0; binds[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        binds[0].descriptorCount = 1; binds[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        binds[1].binding = 1; binds[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        binds[1].descriptorCount = 1; binds[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        binds[2].binding = 2; binds[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        binds[2].descriptorCount = 1; binds[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        VkDescriptorSetLayoutCreateInfo dslci{};
+        dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslci.bindingCount = has_cells ? 3u : 2u; dslci.pBindings = binds;
+        vkCreateDescriptorSetLayout(dev, &dslci, nullptr, &dsl);
+
+        VkPushConstantRange pcr{};
+        pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pcr.size = sizeof(RtPushConstants);
+        VkPipelineLayoutCreateInfo plci{};
+        plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plci.setLayoutCount = 1; plci.pSetLayouts = &dsl;
+        plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
+        vkCreatePipelineLayout(dev, &plci, nullptr, &playout);
+
+        VkComputePipelineCreateInfo cpci{};
+        cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpci.stage.module = module;
+        cpci.stage.pName = "main";
+        cpci.layout = playout;
+        if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, nullptr, &pipeline)
+            != VK_SUCCESS)
+            return std::unexpected("rtx_query: vkCreateComputePipelines failed");
+
+        cache->pipeline          = pipeline;
+        cache->pipeline_layout   = playout;
+        cache->descriptor_layout = dsl;
+        cache->shader_modules[0] = module;
+        cache->key               = want_key;
+        cache->key_src           = key_src;
+        cache->valid             = true;
+    }
+
+    // Frame resources, cached across frames (the SBT path's helper).
+    auto frt = acquire_frame_rt(ctx, cache, width, height, /*cacheable=*/true, float_image);
+    if (!frt) return std::unexpected(frt.error());
+    VkImage        image      = frt->image;
+    VkImageView    image_view = frt->view;
+
+    // Descriptor set: TLAS + image (+ cells), rebuilt when the structure changes.
+    VkAccelerationStructureKHR tlas = accel.tlas();
+    const bool desc_cached = cache->frame_desc_set && cache->frame_tlas == (const void*)tlas;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet  dset = VK_NULL_HANDLE;
+    if (desc_cached) {
+        pool = (VkDescriptorPool)cache->frame_desc_pool;
+        dset = (VkDescriptorSet)cache->frame_desc_set;
+    } else {
+        if (cache->frame_desc_pool)
+            vkDestroyDescriptorPool(dev, (VkDescriptorPool)cache->frame_desc_pool, nullptr);
+        VkDescriptorPoolSize ps[3]{};
+        ps[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; ps[0].descriptorCount = 1;
+        ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; ps[1].descriptorCount = 1;
+        ps[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[2].descriptorCount = 1;
+        VkDescriptorPoolCreateInfo dpci{};
+        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpci.maxSets = 1; dpci.poolSizeCount = 3; dpci.pPoolSizes = ps;
+        vkCreateDescriptorPool(dev, &dpci, nullptr, &pool);
+        VkDescriptorSetAllocateInfo dsai{};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &dsl;
+        vkAllocateDescriptorSets(dev, &dsai, &dset);
+        cache->frame_desc_pool = pool; cache->frame_desc_set = dset;
+        cache->frame_tlas = (const void*)tlas;
+
+        VkWriteDescriptorSetAccelerationStructureKHR was{};
+        was.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+        was.accelerationStructureCount = 1; was.pAccelerationStructures = &tlas;
+        VkWriteDescriptorSet w0{};
+        w0.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w0.pNext = &was; w0.dstSet = dset; w0.dstBinding = 0;
+        w0.descriptorCount = 1; w0.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        VkDescriptorImageInfo dii{};
+        dii.imageView = image_view; dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet w1{};
+        w1.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w1.dstSet = dset; w1.dstBinding = 1;
+        w1.descriptorCount = 1; w1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w1.pImageInfo = &dii;
+        VkDescriptorBufferInfo dbi{};
+        VkWriteDescriptorSet w2{};
+        std::vector<VkWriteDescriptorSet> writes = {w0, w1};
+        if (has_cells) {
+            dbi.buffer = accel.aabb_buffer(); dbi.offset = 0; dbi.range = VK_WHOLE_SIZE;
+            w2.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w2.dstSet = dset; w2.dstBinding = 2;
+            w2.descriptorCount = 1; w2.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w2.pBufferInfo = &dbi;
+            writes.push_back(w2);
+        }
+        vkUpdateDescriptorSets(dev, (std::uint32_t)writes.size(), writes.data(), 0, nullptr);
+    }
+
+    // Timestamps (profiling only), as the SBT path takes them.
+    VkQueryPool qpool = VK_NULL_HANDLE;
+    if (rtx_profile_on()) {
+        if (!cache->frame_query_pool) {
+            VkQueryPoolCreateInfo qci{};
+            qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qci.queryCount = 3;
+            VkQueryPool qp = VK_NULL_HANDLE;
+            if (vkCreateQueryPool(dev, &qci, nullptr, &qp) == VK_SUCCESS) {
+                cache->frame_query_pool = qp;
+                VkPhysicalDeviceProperties props{};
+                vkGetPhysicalDeviceProperties(ctx.physical_device(), &props);
+                cache->timestamp_period_ns = props.limits.timestampPeriod;
+            }
+        }
+        qpool = (VkQueryPool)cache->frame_query_pool;
+    }
+
+    // Command buffer, reused.
+    VkCommandPool cpool = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (cache->frame_cmd_buf) {
+        cpool = (VkCommandPool)cache->frame_cmd_pool;
+        cmd   = (VkCommandBuffer)cache->frame_cmd_buf;
+        vkResetCommandPool(dev, cpool, 0);
+    } else {
+        VkCommandPoolCreateInfo cpci{};
+        cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpci.queueFamilyIndex = ctx.queue_family();
+        cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        vkCreateCommandPool(dev, &cpci, nullptr, &cpool);
+        VkCommandBufferAllocateInfo cbai{};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool = cpool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        vkAllocateCommandBuffers(dev, &cbai, &cmd);
+        cache->frame_cmd_pool = cpool; cache->frame_cmd_buf = cmd;
+    }
+
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    if (qpool) vkCmdResetQueryPool(cmd, qpool, 0, 3);
+
+    VkImageMemoryBarrier toGeneral{};
+    toGeneral.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toGeneral.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    toGeneral.image = image;
+    toGeneral.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    toGeneral.srcAccessMask = 0;
+    toGeneral.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, playout, 0, 1, &dset, 0, nullptr);
+    vkCmdPushConstants(cmd, playout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RtPushConstants), &pc);
+    if (qpool) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, 0);
+    vkCmdDispatch(cmd, ((std::uint32_t)width + 7) / 8, ((std::uint32_t)height + 7) / 8, 1);
+    if (qpool) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 1);
+
+    VkImageMemoryBarrier toSrc = toGeneral;
+    toSrc.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toSrc.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toSrc);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copy.imageExtent = { (std::uint32_t)width, (std::uint32_t)height, 1 };
+    vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           frt->readback, 1, &copy);
+    if (qpool) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 2);
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+    VkFence fence = VK_NULL_HANDLE;
+    if (cache->frame_fence) {
+        fence = (VkFence)cache->frame_fence;
+        vkResetFences(dev, 1, &fence);
+    } else {
+        VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        vkCreateFence(dev, &fci, nullptr, &fence);
+        cache->frame_fence = fence;
+    }
+    auto t_trace0 = clk::now();
+    vkQueueSubmit(ctx.queue(), 1, &si, fence);
+    wait_fence(dev, fence);
+    auto t_trace1 = clk::now();
+
+    RtRenderResult out;
+    out.width = width; out.height = height;
+    if (qpool) {
+        std::uint64_t ts[3] = {0, 0, 0};
+        if (vkGetQueryPoolResults(dev, qpool, 0, 3, sizeof(ts), ts, sizeof(ts[0]),
+                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            const double k = cache->timestamp_period_ns * 1e-6;
+            out.gpu_trace_ms = (double)(ts[1] - ts[0]) * k;
+            out.gpu_copy_ms  = (double)(ts[2] - ts[1]) * k;
+        }
+    }
+    auto t_rb0 = clk::now();
+    read_frame(frt->mapped, width, height, float_image, want_rgba8, out);
+    auto t_rb1 = clk::now();
+    out.pipeline_ms = ms(t_pipe0, t_trace0);
+    out.trace_ms    = ms(t_trace0, t_trace1);
+    out.readback_ms = ms(t_rb0, t_rb1);
+    return out;
 }
 
 }  // namespace frep::gpu

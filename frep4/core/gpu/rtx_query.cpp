@@ -2,10 +2,14 @@
 
 #include "core/gpu/rtx_query.hpp"
 #include "core/gpu/glsl_emitter.hpp"
+#include "core/gpu/rgba_unpack.hpp"
+#include "core/gpu/vk_fence_wait.hpp"
+#include "core/frep/scene_bounds.hpp"
 
 #include <vulkan/vulkan.h>
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 
@@ -62,7 +66,7 @@ int find_mem(VkPhysicalDevice phys, std::uint32_t bits, VkMemoryPropertyFlags wa
 }  // namespace
 
 std::expected<std::string, std::string>
-emit_ray_query_compute(const SceneGraph& scene, const TracerConfig& cfg) {
+emit_ray_query_compute(const SceneGraph& scene, const TracerConfig& cfg, bool cells) {
     auto comp = GlslEmitter::emit(scene, cfg);
     if (!comp) return std::unexpected("rtx_query: " + comp.error());
     if (comp->mesh_count > 0 || comp->texture_count > 0)
@@ -74,6 +78,18 @@ emit_ray_query_compute(const SceneGraph& scene, const TracerConfig& cfg) {
     std::string push = lift_push(comp->source, err);
     if (!err.empty()) return std::unexpected(err);
 
+    // Same literal formatting as the compute emitter's flit(), so the clip
+    // planes are bit-identical to the ones the compute and SBT paths use.
+    auto lit = [](float v) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.9g", v);
+        std::string r(buf);
+        if (r.find('.') == std::string::npos && r.find('e') == std::string::npos) r += ".0";
+        return r;
+    };
+    FRepNode::AABB clip{};
+    const bool clipped = cfg.bbox_clip && scene_clip_box(scene, clip);
+
     std::ostringstream s;
     s << "#version 460\n"
       << "#extension GL_EXT_ray_query : require\n"
@@ -81,8 +97,14 @@ emit_ray_query_compute(const SceneGraph& scene, const TracerConfig& cfg) {
       << push
       << shared
       << "layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;\n"
-      << "layout(set = 0, binding = 1, rgba32f) uniform image2D out_img;\n"
-      << "void main() {\n"
+      << "layout(set = 0, binding = 1, "
+      << (cfg.output_format == TracerConfig::OutputFormat::Float ? "rgba32f" : "rgba8")
+      << ") uniform image2D out_img;\n";
+    if (cells)
+        s << "layout(std430, set = 0, binding = 2) readonly buffer RtCells {\n"
+          << "    float v[];   // six per cell: min.xyz, max.xyz\n"
+          << "} rt_cells;\n";
+    s << "void main() {\n"
       << "    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);\n"
       << "    if (pix.x >= pc.width || pix.y >= pc.height) return;\n"
       // Identical primary-ray formula to the SBT raygen / compute emitter.
@@ -101,7 +123,7 @@ emit_ray_query_compute(const SceneGraph& scene, const TracerConfig& cfg) {
       << "    }\n"
       << "    vec3 color = sky_color_s(0.5 + 0.5 * v);\n"
       << "    float tmin = 0.001;\n"
-      << "    float tmax = " << cfg.max_dist << ";\n"
+      << "    float tmax = " << lit(cfg.max_dist) << ";\n"
       // Hardware BVH broad phase: rayQueryEXT walks the TLAS. On each candidate
       // procedural AABB we sphere-trace scene_sdf INLINE (full compute occupancy,
       // no intersection-shader stage). Committing a hit shrinks the ray interval,
@@ -112,23 +134,49 @@ emit_ray_query_compute(const SceneGraph& scene, const TracerConfig& cfg) {
       << "    while (rayQueryProceedEXT(rq)) {\n"
       << "        if (rayQueryGetIntersectionTypeEXT(rq, false)\n"
       << "            == gl_RayQueryCandidateIntersectionAABBEXT) {\n"
-      << "            float t = tmin;\n"
-      << "            bool hit = false; float last_d = 1e30;\n"
-      << "            float step_len = 0.0; float omega = " << cfg.over_relax << ";\n"
+      << "            float t = tmin, t1 = tmax;\n"
+      // A candidate box that straddles an already committed hit is still
+      // offered; a generated intersection must not lie beyond that hit, so
+      // the march stops there (which is also where it stops being useful).
+      << "            if (rayQueryGetIntersectionTypeEXT(rq, true)\n"
+      << "                != gl_RayQueryCommittedIntersectionNoneEXT)\n"
+      << "                t1 = min(t1, rayQueryGetIntersectionTEXT(rq, true));\n";
+    // Clip the march to the candidate box: the cell this candidate is (read
+    // by its primitive index), or the whole-scene box the compute path clips
+    // to, so the march runs the same segment the other paths run.
+    if (cells)
+        s << "            int c = 6 * rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);\n"
+          << "            vec3 bmin = vec3(rt_cells.v[c], rt_cells.v[c + 1], rt_cells.v[c + 2]);\n"
+          << "            vec3 bmax = vec3(rt_cells.v[c + 3], rt_cells.v[c + 4], rt_cells.v[c + 5]);\n";
+    else if (clipped)
+        s << "            vec3 bmin = vec3(" << lit(clip.min_x) << ", " << lit(clip.min_y) << ", " << lit(clip.min_z) << ");\n"
+          << "            vec3 bmax = vec3(" << lit(clip.max_x) << ", " << lit(clip.max_y) << ", " << lit(clip.max_z) << ");\n";
+    if (cells || clipped)
+        s << "            {\n"
+          << "                vec3 inv = 1.0 / rd;\n"
+          << "                vec3 ta = (bmin - ro) * inv;\n"
+          << "                vec3 tb = (bmax - ro) * inv;\n"
+          << "                vec3 tmn = min(ta, tb);\n"
+          << "                vec3 tmx = max(ta, tb);\n"
+          << "                t  = max(t,  max(max(tmn.x, tmn.y), tmn.z));\n"
+          << "                t1 = min(t1, min(min(tmx.x, tmx.y), tmx.z));\n"
+          << "            }\n";
+    s << "            bool hit = false; float last_d = 1e30;\n"
+      << "            float step_len = 0.0; float omega = " << lit(cfg.over_relax) << ";\n"
       << "            for (int i = 0; i < " << cfg.max_steps << "; ++i) {\n"
-      << "                if (t > tmax) break;\n"
+      << "                if (t > t1) break;\n"
       << "                vec3 p = ro + rd * t;\n"
       << "                float d = scene_sdf_v(p);\n"
-      << "                float radius = d * " << cfg.safety_factor << ";\n"
+      << "                float radius = d * " << lit(cfg.safety_factor) << ";\n"
       << "                bool sor_fail = (omega > 1.0) && ((radius + last_d) < step_len);\n"
       << "                step_len = sor_fail ? (step_len * (1.0 - omega)) : (radius * omega);\n"
       << "                omega = sor_fail ? 1.0 : omega;\n"
-      << "                if (d < " << cfg.epsilon << " && !sor_fail) { hit = true; last_d = d; break; }\n"
+      << "                if (d < " << lit(cfg.epsilon) << " && !sor_fail) { hit = true; last_d = d; break; }\n"
       << "                last_d = d;\n"
       << "                t += step_len;\n"
       << "            }\n"
-      << "            if (!hit && t <= tmax && last_d < " << (cfg.epsilon * 80.0f) << ") hit = true;\n"
-      << "            if (hit && t <= tmax) rayQueryGenerateIntersectionEXT(rq, t);\n"
+      << "            if (!hit && t <= t1 && last_d < " << lit(cfg.epsilon * 80.0f) << ") hit = true;\n"
+      << "            if (hit && t >= tmin && t <= t1) rayQueryGenerateIntersectionEXT(rq, t);\n"
       << "        }\n"
       << "    }\n"
       << "    if (rayQueryGetIntersectionTypeEXT(rq, true)\n"
@@ -161,7 +209,10 @@ rtx_query_trace(const RtxCtx& ctx, const RtAccel& accel,
     if (vkCreateShaderModule(dev, &smci, nullptr, &module) != VK_SUCCESS)
         return std::unexpected("rtx_query: vkCreateShaderModule failed");
 
-    VkDescriptorSetLayoutBinding binds[2]{};
+    // Shell cells (rtx_cells.hpp): with more than one box the shader reads the
+    // candidate cell's bounds from the box list at binding 2.
+    const bool has_cells = accel.aabb_count() > 1 && accel.aabb_buffer();
+    VkDescriptorSetLayoutBinding binds[3]{};
     binds[0].binding = 0;
     binds[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     binds[0].descriptorCount = 1;
@@ -170,9 +221,13 @@ rtx_query_trace(const RtxCtx& ctx, const RtAccel& accel,
     binds[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     binds[1].descriptorCount = 1;
     binds[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    binds[2].binding = 2;
+    binds[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    binds[2].descriptorCount = 1;
+    binds[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     VkDescriptorSetLayoutCreateInfo dslci{};
     dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslci.bindingCount = 2; dslci.pBindings = binds;
+    dslci.bindingCount = has_cells ? 3 : 2; dslci.pBindings = binds;
     VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
     vkCreateDescriptorSetLayout(dev, &dslci, nullptr, &dsl);
 
@@ -198,11 +253,12 @@ rtx_query_trace(const RtxCtx& ctx, const RtAccel& accel,
         != VK_SUCCESS)
         return std::unexpected("rtx_query: vkCreateComputePipelines failed");
 
-    // ── Output image (rgba32f, storage) ─────────────────────────────────────
+    // ── Output image (rgba8, storage; the format the SBT and compute paths
+    //    write, so the three move the same bytes) ──────────────────────────
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
     ici.extent = { (std::uint32_t)width, (std::uint32_t)height, 1 };
     ici.mipLevels = 1; ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -226,18 +282,19 @@ rtx_query_trace(const RtxCtx& ctx, const RtAccel& accel,
     VkImageViewCreateInfo ivci{};
     ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     ivci.image = image; ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
     ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     VkImageView image_view = VK_NULL_HANDLE;
     vkCreateImageView(dev, &ivci, nullptr, &image_view);
 
     // ── Descriptor pool + set: TLAS (0) + storage image (1) ─────────────────
-    VkDescriptorPoolSize ps[2]{};
+    VkDescriptorPoolSize ps[3]{};
     ps[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; ps[0].descriptorCount = 1;
     ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; ps[1].descriptorCount = 1;
+    ps[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[2].descriptorCount = 1;
     VkDescriptorPoolCreateInfo dpci{};
     dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpci.maxSets = 1; dpci.poolSizeCount = 2; dpci.pPoolSizes = ps;
+    dpci.maxSets = 1; dpci.poolSizeCount = 3; dpci.pPoolSizes = ps;
     VkDescriptorPool pool = VK_NULL_HANDLE;
     vkCreateDescriptorPool(dev, &dpci, nullptr, &pool);
     VkDescriptorSetAllocateInfo dsai{};
@@ -261,8 +318,17 @@ rtx_query_trace(const RtxCtx& ctx, const RtAccel& accel,
     w1.dstSet = dset; w1.dstBinding = 1;
     w1.descriptorCount = 1; w1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w1.pImageInfo = &dii;
-    VkWriteDescriptorSet writes[2] = {w0, w1};
-    vkUpdateDescriptorSets(dev, 2, writes, 0, nullptr);
+    VkDescriptorBufferInfo dbi{};
+    VkWriteDescriptorSet w2{};
+    if (has_cells) {
+        dbi.buffer = accel.aabb_buffer(); dbi.offset = 0; dbi.range = VK_WHOLE_SIZE;
+        w2.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w2.dstSet = dset; w2.dstBinding = 2;
+        w2.descriptorCount = 1; w2.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w2.pBufferInfo = &dbi;
+    }
+    VkWriteDescriptorSet writes[3] = {w0, w1, w2};
+    vkUpdateDescriptorSets(dev, has_cells ? 3 : 2, writes, 0, nullptr);
 
     // ── Command buffer: barrier, dispatch, copy to host buffer ──────────────
     VkCommandPoolCreateInfo cpi{};
@@ -277,7 +343,7 @@ rtx_query_trace(const RtxCtx& ctx, const RtAccel& accel,
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     vkAllocateCommandBuffers(dev, &cbai, &cmd);
 
-    VkDeviceSize img_bytes = (VkDeviceSize)width * height * 4 * sizeof(float);
+    VkDeviceSize img_bytes = (VkDeviceSize)width * height * 4;   // rgba8
     VkBuffer rb_buf = VK_NULL_HANDLE; VkDeviceMemory rb_mem = VK_NULL_HANDLE;
     {
         VkBufferCreateInfo bci{};
@@ -354,7 +420,7 @@ rtx_query_trace(const RtxCtx& ctx, const RtAccel& accel,
     vkCreateFence(dev, &fci, nullptr, &fence);
     auto t_trace0 = clk::now();
     vkQueueSubmit(ctx.queue(), 1, &si, fence);
-    vkWaitForFences(dev, 1, &fence, VK_TRUE, ~0ull);
+    wait_fence(dev, fence);   // the same spinning wait the SBT path uses
     auto t_trace1 = clk::now();
 
     RtRenderResult out;
@@ -364,7 +430,7 @@ rtx_query_trace(const RtxCtx& ctx, const RtAccel& accel,
     {
         void* p = nullptr;
         vkMapMemory(dev, rb_mem, 0, img_bytes, 0, &p);
-        std::memcpy(out.rgba.data(), p, (size_t)img_bytes);
+        unpack_rgba8(static_cast<const std::uint8_t*>(p), out.rgba.data(), out.rgba.size());
         vkUnmapMemory(dev, rb_mem);
     }
     auto t_rb1 = clk::now();

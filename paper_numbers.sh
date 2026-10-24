@@ -169,11 +169,23 @@ do_hetero() {
 }
 
 # ── RTX multi-BLAS instance scaling ─────────────────────────────────────────
+# The instance table (tab:rtx): a grid of N separable spheres at 1024², the
+# CPU path against the RT path in its two constructions -- one bottom-level
+# structure per union member (the default build) and one per shared prototype
+# placed by instance transforms (--factor). One process per construction so
+# the driver's shader cache and the card's clocks start the same way for
+# both. The CPU column comes from the same runs, so it is measured on the
+# same build as the trace columns rather than carried over from an older one.
 do_rtx() {
     [ -x "$BIN/frep4/frep_rtx_bench" ] || {
         echo "skip rtx: $BIN/frep4/frep_rtx_bench not built" >&2; return 0; }
     f="$OUT/rtx_instances.txt"; provenance "$f"
-    "$BIN/frep4/frep_rtx_bench" --energy >> "$f" 2>&1 || true
+    bind_gpu "$BIN/frep4/frep_rtx_bench" --width 1024 --height 1024 \
+        --counts 1,4,16,64,256,1024 --energy >> "$f" 2>&1 || true
+    echo "-> $f"
+    f="$OUT/rtx_instances_factor.txt"; provenance "$f"
+    bind_gpu "$BIN/frep4/frep_rtx_bench" --width 1024 --height 1024 \
+        --counts 1,4,16,64,256,1024 --energy --factor >> "$f" 2>&1 || true
     echo "-> $f"
 }
 

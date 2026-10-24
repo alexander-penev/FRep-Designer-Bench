@@ -91,6 +91,15 @@ public:
     // Number of TLAS instances (= groups for build_groups, 1 otherwise).
     std::uint32_t instance_count() const { return inst_count_; }
 
+    // The single-BLAS build's box list, as the shader sees it: `aabb_count()`
+    // boxes of six floats {min.xyz, max.xyz}, in a device-local storage
+    // buffer. With more than one box the field was split into shell cells
+    // (rtx_cells.hpp) and the intersection shader reads its cell from here by
+    // gl_PrimitiveID; the group and instanced builds keep their boxes per
+    // BLAS and report zero.
+    VkBuffer      aabb_buffer() const { return aabb_buf_; }
+    std::uint32_t aabb_count()  const { return aabb_count_; }
+
     // Device memory the acceleration structure occupies, in bytes. Reported
     // because memory is one of the axes the backends are compared on, and it is
     // where instancing shows its clearest win: N copies of one shape need one
@@ -127,6 +136,7 @@ private:
     VkAccelerationStructureKHR tlas_ = nullptr;
     std::uint64_t   tlas_addr_ = 0;
     std::uint32_t   inst_count_ = 1;
+    std::uint32_t   aabb_count_ = 0;
     Memory          mem_{};
 
     // Multi-BLAS: one entry per group. Parallel to the single-BLAS

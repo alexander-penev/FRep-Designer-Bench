@@ -83,10 +83,11 @@ private:
     std::string binop(const expr::Node& n) {
         auto a = go(*n.children[0]);
         auto b = go(*n.children[1]);
+        std::string v = "vec2(0.0)";
         switch (n.bop) {
-            case expr::Op::Add: return tmp(a + " + " + b);
-            case expr::Op::Sub: return tmp("vec2(" + a + ".x - " + b + ".y, "
-                                                   + a + ".y - " + b + ".x)");
+            case expr::Op::Add: v = tmp(a + " + " + b); break;
+            case expr::Op::Sub: v = tmp("vec2(" + a + ".x - " + b + ".y, "
+                                                + a + ".y - " + b + ".x)"); break;
             case expr::Op::Mul: {
                 // Same-variable product is a square: its minimum is 0 when the
                 // interval straddles 0, not the endpoint product.
@@ -95,13 +96,19 @@ private:
                 bool sq = (&c0 == &c1) ||
                           (c0.kind == expr::Node::Kind::Var &&
                            c1.kind == expr::Node::Kind::Var && c0.ident == c1.ident);
-                if (sq)
-                    return tmp("ival_sqr(" + a + ")");
-                return tmp("ival_mul(" + a + ", " + b + ")");
+                v = sq ? tmp("ival_sqr(" + a + ")")
+                       : tmp("ival_mul(" + a + ", " + b + ")");
+                break;
             }
-            case expr::Op::Div: return tmp("ival_div(" + a + ", " + b + ")");
+            case expr::Op::Div: v = tmp("ival_div(" + a + ", " + b + ")"); break;
         }
-        return "vec2(0.0)";
+        // Rotation pair (expr_ast.hpp): ±a·cos θ ± b·sin θ lies in [-r, r],
+        // r = sqrt(a² + b²), whatever θ does over the box. The term-by-term
+        // sum above lets both products be extreme at once and is up to √2
+        // wider; ival_rot intersects, keeping whichever end is tighter.
+        if (auto rp = expr::match_rotation_pair(n))
+            v = tmp("ival_rot(" + go(*rp->a) + ", " + go(*rp->b) + ", " + v + ")");
+        return v;
     }
 
     std::string call(const expr::Node& n) {
@@ -111,7 +118,17 @@ private:
         if (f == "sqrt")  return tmp("ival_sqrt(" + a[0] + ")");
         if (f == "abs")   return tmp("ival_abs(" + a[0] + ")");
         if (f == "min")   return tmp("min(" + a[0] + ", " + a[1] + ")");
-        if (f == "max")   return tmp("max(" + a[0] + ", " + a[1] + ")");
+        if (f == "max") {
+            std::string v = tmp("max(" + a[0] + ", " + a[1] + ")");
+            // Rotated box (expr_ast.hpp): max(|P| + c1, |Q| + c2) with (P, Q) = (a, b)
+            // turned by θ is at least sqrt((a² + b²)/2) + min(c1, c2). The term-by-
+            // term max above falls to min(c1, c2) wherever P and Q both straddle 0,
+            // which far from the axis they do as soon as θ spans a quarter turn.
+            if (auto rb = expr::match_rotated_box(n))
+                v = tmp("ival_rotbox(" + go(*rb->a) + ", " + go(*rb->b) + ", "
+                        + fmt(std::min(rb->c1, rb->c2)) + ", " + v + ")");
+            return v;
+        }
         if (f == "pow")   return tmp("ival_pow(" + a[0] + ", " + a[1] + ")");
         // nth_root(a,b) == a^(1/b); reciprocal of a positive interval flips ends.
         if (f == "nth_root")
@@ -163,6 +180,18 @@ vec2 ival_abs(vec2 a) {
 }
 vec2 ival_pow(vec2 a, vec2 e) {   // constant exponent, non-negative base
     return vec2(pow(max(a.x,0.0), e.x), pow(max(a.y,0.0), e.y));
+}
+// Rotation pair: a*cos(th) +- b*sin(th) lies in [-r, r], r = sqrt(a^2 + b^2),
+// whatever th does over the box; s is the term-by-term sum it narrows.
+vec2 ival_rot(vec2 a, vec2 b, vec2 s) {
+    float r = sqrt(max(a.x*a.x, a.y*a.y) + max(b.x*b.x, b.y*b.y));
+    return vec2(max(s.x, -r), min(s.y, r));
+}
+// Rotated box: max(|P| + c1, |Q| + c2) with (P, Q) = (a, b) turned by th is at
+// least sqrt((a^2 + b^2)/2) + min(c1, c2); m is the term-by-term max it raises.
+vec2 ival_rotbox(vec2 a, vec2 b, float c, vec2 m) {
+    float lo = sqrt(0.5 * (ival_sqr(a).x + ival_sqr(b).x)) + c;
+    return vec2(max(m.x, lo), m.y);
 }
 vec2 ival_mod(vec2 a, vec2 m) {   // conservative: any value in [0,m)
     if (m.x != m.y || m.x <= 0.0) return vec2(-1e30, 1e30);

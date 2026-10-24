@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(frep VERSION 4.55.0 LANGUAGES C CXX)
+project(frep VERSION 4.56.0 LANGUAGES C CXX)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # C++26
@@ -317,6 +317,7 @@ if(FREP_BUILD_GPU)
         core/gpu/rtx_caps.cpp
         core/gpu/rtx_ctx.cpp
         core/gpu/rtx_accel.cpp
+        core/gpu/rtx_cells.cpp
         core/gpu/rtx_shaders.cpp
         core/gpu/rtx_pipeline.cpp
         core/gpu/rtx_csg_groups.cpp

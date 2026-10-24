@@ -97,6 +97,37 @@ upload(const RtxCtx& ctx, const void* data, VkDeviceSize size,
     return {};
 }
 
+std::expected<void, std::string>
+one_shot(const RtxCtx& ctx, const std::function<void(VkCommandBuffer)>& rec);
+
+// Upload host bytes into a device-local buffer through a temporary staging
+// copy. For data the GPU reads repeatedly (the cell boxes the intersection
+// shader clips to), as opposed to a one-off build input.
+std::expected<void, std::string>
+upload_device_local(const RtxCtx& ctx, const void* data, VkDeviceSize size,
+                    VkBufferUsageFlags usage, VkBuffer& buf, VkDeviceMemory& mem) {
+    auto r = make_buffer(ctx, size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true, buf, mem);
+    if (!r) return r;
+    VkBuffer sbuf = nullptr; VkDeviceMemory smem = nullptr;
+    auto s = make_buffer(ctx, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         false, sbuf, smem);
+    if (!s) return s;
+    void* p = nullptr;
+    vkMapMemory(ctx.device(), smem, 0, size, 0, &p);
+    std::memcpy(p, data, (size_t)size);
+    vkUnmapMemory(ctx.device(), smem);
+    auto copied = one_shot(ctx, [&](VkCommandBuffer cmd) {
+        VkBufferCopy region{}; region.size = size;
+        vkCmdCopyBuffer(cmd, sbuf, buf, 1, &region);
+    });
+    vkDestroyBuffer(ctx.device(), sbuf, nullptr);
+    vkFreeMemory(ctx.device(), smem, nullptr);
+    return copied;
+}
+
 // Run a one-shot command buffer that records `rec` and wait for it.
 std::expected<void, std::string>
 one_shot(const RtxCtx& ctx, const std::function<void(VkCommandBuffer)>& rec) {
@@ -153,7 +184,7 @@ RtAccel& RtAccel::operator=(RtAccel&& o) noexcept {
         inst_buf_ = o.inst_buf_; inst_mem_ = o.inst_mem_;
         scratch_buf_ = o.scratch_buf_; scratch_mem_ = o.scratch_mem_;
         blas_ = o.blas_; tlas_ = o.tlas_; tlas_addr_ = o.tlas_addr_;
-        inst_count_ = o.inst_count_; mem_ = o.mem_;
+        inst_count_ = o.inst_count_; aabb_count_ = o.aabb_count_; mem_ = o.mem_;
         g_aabb_buf_ = std::move(o.g_aabb_buf_); g_aabb_mem_ = std::move(o.g_aabb_mem_);
         g_blas_buf_ = std::move(o.g_blas_buf_); g_blas_mem_ = std::move(o.g_blas_mem_);
         g_scratch_buf_ = std::move(o.g_scratch_buf_);
@@ -220,12 +251,22 @@ RtAccel::build(const RtxCtx& ctx, const std::vector<RtAabb>& boxes) {
     // ── BLAS: an AABBs geometry over `boxes` ────────────────────────────────
     // VkAabbPositionsKHR is exactly {minX,minY,minZ,maxX,maxY,maxZ} floats, so
     // our RtAabb maps 1:1.
+    //
+    // The box list is also bound to the intersection shader (rtx_pipeline
+    // binding 4): with the field split into shell cells, the shader reads the
+    // cell it was invoked for by gl_PrimitiveID and clips its march to it.
+    // That read happens on every invocation, so the buffer lives in device
+    // memory rather than the host-visible memory the one-shot build input
+    // used to sit in, where each read would have crossed PCIe.
     {
         VkDeviceSize aabb_bytes = boxes.size() * sizeof(VkAabbPositionsKHR);
-        auto up = upload(ctx, boxes.data(), aabb_bytes,
-                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                         /*device_address=*/true, a.aabb_buf_, a.aabb_mem_);
+        auto up = upload_device_local(
+            ctx, boxes.data(), aabb_bytes,
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            a.aabb_buf_, a.aabb_mem_);
         if (!up) return std::unexpected(up.error());
+        a.aabb_count_ = (std::uint32_t)boxes.size();
 
         VkAccelerationStructureGeometryKHR geo{};
         geo.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;

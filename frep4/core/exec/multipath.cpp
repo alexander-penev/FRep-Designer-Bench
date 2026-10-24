@@ -271,29 +271,111 @@ TileResult::~TileResult() {
     recycle(rgba8);
 }
 
-// ── Tile queue cursor ─────────────────────────────────────────────────────
+// ── Tile queue (every policy) ─────────────────────────────────────────────
 
-TileQueueCursor::TileQueueCursor(std::size_t n_tiles, std::size_t n_execs, QueuePolicy p)
-    : n_(n_tiles),
-      policy_(p == QueuePolicy::Auto ? QueuePolicy::FastestTail : p),
-      ema_(n_execs, 0.0) {}
+QueuePolicy TileQueue::resolve(QueuePolicy p) {
+    return p == QueuePolicy::Auto ? QueuePolicy::Guided : p;
+}
 
-std::size_t TileQueueCursor::take(std::size_t e, double last_ms) {
+TileQueue::TileQueue(std::vector<Tile> cells, std::size_t n_execs, QueuePolicy p,
+                     std::vector<double> speeds)
+    : cells_(std::move(cells)), policy_(resolve(p)),
+      ms_per_cell_(n_execs, 0.0), last_cells_(n_execs, 0) {
+    for (std::size_t i = 0; i < n_execs && i < speeds.size(); ++i)
+        if (speeds[i] > 0) ms_per_cell_[i] = speeds[i];
+}
+
+void TileQueue::reset() {
     std::lock_guard<std::mutex> lk(m_);
-    if (e < ema_.size() && last_ms > 0)
-        ema_[e] = ema_[e] > 0 ? 0.7 * ema_[e] + 0.3 * last_ms : last_ms;
-    if (next_ >= n_) return npos;
-    if (policy_ == QueuePolicy::FastestTail && e < ema_.size() && ema_[e] > 0) {
-        double fastest = ema_[e];
-        for (double v : ema_) if (v > 0 && v < fastest) fastest = v;
-        const double k = ema_[e] / fastest;
-        const std::size_t remaining = n_ - next_;
-        // A tile here would outlast what the fastest executor finishes in
+    next_ = 0;
+    std::fill(last_cells_.begin(), last_cells_.end(), 0);
+}
+
+std::vector<double> TileQueue::speeds() const {
+    std::lock_guard<std::mutex> lk(m_);
+    return ms_per_cell_;
+}
+
+bool TileQueue::take(std::size_t e, double last_ms, Tile& out) {
+    std::lock_guard<std::mutex> lk(m_);
+    const std::size_t n = cells_.size();
+    if (e < ms_per_cell_.size() && last_ms > 0 && last_cells_[e] > 0) {
+        const double per = last_ms / (double)last_cells_[e];
+        ms_per_cell_[e] = ms_per_cell_[e] > 0 ? 0.7 * ms_per_cell_[e] + 0.3 * per : per;
+    }
+    if (next_ >= n) return false;
+    const std::size_t remaining = n - next_;
+
+    // Speeds, for the tail rule and the guided chunk. An executor that has
+    // not reported yet counts as this one's equal.
+    double fastest = 0, sum_speed = 0;
+    std::size_t known = 0;
+    for (double v : ms_per_cell_) if (v > 0) {
+        if (fastest == 0 || v < fastest) fastest = v;
+        sum_speed += 1.0 / v; ++known;
+    }
+    const double mine = e < ms_per_cell_.size() ? ms_per_cell_[e] : 0;
+    if (mine > 0 && known < ms_per_cell_.size())
+        sum_speed += (double)(ms_per_cell_.size() - known) / mine;
+
+    if (policy_ != QueuePolicy::Plain && mine > 0 && fastest > 0) {
+        // A take here would outlast what the fastest executor finishes in
         // the same time; leave the tail to it. (The fast one keeps pulling
         // until the queue is empty, so nothing is left behind.)
-        if (k > 1.5 && static_cast<double>(remaining) < k) return npos;
+        const double k = mine / fastest;
+        if (k > 1.5 && static_cast<double>(remaining) < k) return false;
     }
-    return next_++;
+
+    std::size_t want = 1;
+    if (policy_ == QueuePolicy::Guided) {
+        if (ms_per_cell_.size() <= 1)
+            want = remaining;             // alone: the whole frame in one take
+        else if (mine <= 0)
+            want = 1;                     // unmeasured: a probe
+        else
+            want = (std::size_t)std::ceil((double)remaining * (1.0 / mine) / (2.0 * sum_speed));
+        want = std::clamp<std::size_t>(want, 1, remaining);
+    }
+
+    // Shape the run: cells in one row while adjacent; at a row start, whole
+    // rows while each spans the same width and the rows abut.
+    const Tile& first = cells_[next_];
+    std::size_t taken = 1;
+    Tile t = first;
+    if (want > 1) {
+        // Row of `first`: how many cells to its right are adjacent in it.
+        std::size_t row_end = next_ + 1;
+        while (row_end < n && cells_[row_end].y0 == first.y0 &&
+               cells_[row_end].x0 == cells_[row_end - 1].x1 &&
+               cells_[row_end].y1 == first.y1)
+            ++row_end;
+        const std::size_t row_cells = row_end - next_;
+        // A row start spanning the frame: whole rows, each identical in shape.
+        const bool row_start = next_ == 0 || cells_[next_ - 1].y0 != first.y0;
+        if (row_start && want >= row_cells && row_cells > 1) {
+            std::size_t rows = 1, at = row_end;
+            while (at + row_cells <= n && (rows + 1) * row_cells <= want) {
+                bool same = cells_[at].x0 == first.x0 && cells_[at].y0 == cells_[at - 1].y1;
+                for (std::size_t c = 0; same && c < row_cells; ++c)
+                    same = cells_[at + c].x0 == cells_[next_ + c].x0 &&
+                           cells_[at + c].x1 == cells_[next_ + c].x1 &&
+                           cells_[at + c].y0 == cells_[at].y0 &&
+                           cells_[at + c].y1 == cells_[at].y1;
+                if (!same) break;
+                at += row_cells; ++rows;
+            }
+            taken = rows * row_cells;
+            t.x1 = cells_[next_ + row_cells - 1].x1;
+            t.y1 = cells_[next_ + taken - 1].y1;
+        } else {
+            taken = std::min(want, row_cells);
+            t.x1 = cells_[next_ + taken - 1].x1;
+        }
+    }
+    next_ += taken;
+    if (e < last_cells_.size()) last_cells_[e] = taken;
+    out = t;
+    return true;
 }
 
 // ── Runner ────────────────────────────────────────────────────────────────
@@ -320,27 +402,33 @@ MultiPathResult MultiPathExecutor::run(const SceneGraph& scene, int W, int H,
         // takes warms its compile cache (cold start); every later tile reuses
         // it. Each tile is rendered by exactly one executor (like a split),
         // so results tile the frame and StitchMerge reassembles them.
-        out.tiles.resize(tiles.size());
-        TileQueueCursor cursor(tiles.size(), avail.size(), queue_policy_);
+        // Under the guided policy a take may span several cells, so the
+        // results are collected as they come rather than indexed by cell.
+        TileQueue queue(tiles, avail.size(), queue_policy_,
+                        queue_speeds_.size() == avail.size() ? queue_speeds_
+                                                             : std::vector<double>{});
+        std::mutex out_m;
         std::vector<std::thread> workers;
         workers.reserve(avail.size());
         for (std::size_t k = 0; k < avail.size(); ++k) {
             IExecutor* e = avail[k];
             workers.emplace_back([&, e, k] {
                 double last_ms = 0;
-                for (;;) {
-                    std::size_t i = cursor.take(k, last_ms);
-                    if (i == TileQueueCursor::npos) break;
+                Tile t;
+                while (queue.take(k, last_ms, t)) {
                     auto t0 = clk::now();
-                    out.tiles[i] = e->render(scene, W, H, tiles[i]);
+                    TileResult r = e->render(scene, W, H, t);
                     last_ms = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+                    std::lock_guard<std::mutex> lk(out_m);
+                    out.tiles.push_back(std::move(r));
                 }
             });
         }
         for (auto& t : workers) t.join();
+        queue_speeds_ = queue.speeds();
 
         for (const auto& r : out.tiles) out.timings.sum_render_ms += r.render_ms;
-        out.timings.job_count  = (int)tiles.size();
+        out.timings.job_count  = (int)out.tiles.size();
         out.timings.path_count = (int)avail.size();
         out.merged = merge_.merge(out.tiles, W, H);
         out.timings.wall_ms = std::chrono::duration<double, std::milli>(clk::now() - wall0).count();

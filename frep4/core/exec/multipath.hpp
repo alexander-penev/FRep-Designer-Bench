@@ -312,37 +312,62 @@ enum class RunMode {
 //   FastestTail — an executor whose tiles take k times the fastest's (k from
 //                 a smoothed per-executor tile time) does not start one when
 //                 fewer than k tiles remain; the tail goes to the fast one.
-//                 What Auto means.
-// Measured at 800² in 128-px tiles with CPU_IR and GPU_GLSL (five interleaved
-// rounds): where the CPU is a sixth or less of the GPU's speed per tile (the
-// gyroid, the gear, the colonnade) the tail rule is 5–16% ahead of the plain
-// queue; where it is a quarter to a third (the sphere, the CSG difference,
-// the blend) it is 1–8% behind, because tile cost varies thirtyfold across a
-// frame and the last tiles in row-major order are the cheap background ones
-// a competitive CPU could have taken. Both are within the bench's spread on
-// the balanced scenes, so the unbalanced case decides. What neither rule
-// recovers is paid throughout the frame, not at its tail: the GPU's
-// host-side tile work runs slower while the CPU band works. Both policies are
-// measured by the tile-queue bench (hetero_queue / hetero_plain rows).
-enum class QueuePolicy { Auto, Plain, FastestTail };
+//   Guided      — the tile an executor takes is sized to it: a run of
+//                 consecutive grid cells (a strip of a row, or whole rows)
+//                 proportional to its share of the executors' speed and to
+//                 what is left, so every executor's chunk takes about the same
+//                 wall time and the chunks shrink as the frame drains (guided
+//                 self-scheduling, weighted by measured speed). A GPU path
+//                 then amortises its fixed per-dispatch cost -- the launch,
+//                 the copy back and the fence, which at 128 px is most of its
+//                 tile -- over a strip or a block, while the tail is still
+//                 made of single cells. The tail rule applies as well. What
+//                 Auto means.
+// Measured at 800² over 128-px cells with CPU_IR and GPU_GLSL: with one cell
+// per take the tail rule and the plain queue are within the bench's spread of
+// each other (the tail rule 5–16% ahead on the unbalanced scenes, 1–8% behind
+// on the balanced ones), and both lose most of what the GPU can do, because a
+// 128-px dispatch is mostly its fixed cost; the guided queue roughly doubles
+// the combined throughput on the same cells (sphere 418 → 676 Mpix/s, gyroid
+// 293 → 558). The tile-queue bench measures all three (hetero_tail,
+// hetero_plain, hetero_guided rows).
+enum class QueuePolicy { Auto, Plain, FastestTail, Guided };
 
-// The shared cursor of a dynamic tile queue, with the policy applied. One
-// per frame; every executor's worker calls take() until it returns npos.
-class TileQueueCursor {
+// The shared cursor of a dynamic tile queue over a grid of cells, with the
+// policy applied; every executor's worker calls take() until it returns
+// false. Under Plain and FastestTail each take() is one cell; under Guided it
+// is the run of cells described above, merged into one rectangle. The cells
+// are the decomposition's tiles in their order, which for the regular grid is
+// row-major; consecutive cells are merged only while they are adjacent in one
+// row, and whole rows only while each spans the frame, so an irregular
+// decomposition degrades to one cell per take.
+class TileQueue {
 public:
-    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
-    TileQueueCursor(std::size_t n_tiles, std::size_t n_execs, QueuePolicy p);
-    // Next tile for executor `e`, or npos when it should stop. `last_ms` is
-    // how long its previous tile took (<= 0 when it has none yet); it feeds a
-    // per-executor smoothed tile time the tail rule compares.
-    std::size_t take(std::size_t e, double last_ms);
-    std::size_t taken() const { return next_; }
+    // `speeds` seeds the per-executor cell times from an earlier frame (see
+    // speeds()); empty means every executor starts unmeasured and its first
+    // take is a single cell, a probe -- under Guided an unmeasured executor
+    // given a share of the frame could be eighty times slower than its
+    // partner, and the frame would wait on that share.
+    TileQueue(std::vector<Tile> cells, std::size_t n_execs, QueuePolicy p,
+              std::vector<double> speeds = {});
+    // Next rectangle for executor `e`; false when it should stop. `last_ms`
+    // is how long its previous take rendered (<= 0 when it has none yet).
+    bool take(std::size_t e, double last_ms, Tile& out);
+    // Start the next frame over the same cells, keeping what was measured.
+    void reset();
+    std::size_t cells_taken() const { return next_; }
+    QueuePolicy policy() const { return policy_; }
+    // The smoothed ms per cell of each executor, to seed the next frame's queue.
+    std::vector<double> speeds() const;
+    // What Auto resolves to.
+    static QueuePolicy resolve(QueuePolicy p);
 private:
-    std::size_t          n_;
+    std::vector<Tile>    cells_;
     QueuePolicy          policy_;
-    std::mutex           m_;
+    mutable std::mutex   m_;
     std::size_t          next_ = 0;
-    std::vector<double>  ema_;   // per-executor tile time, smoothed
+    std::vector<double>  ms_per_cell_;   // per-executor, smoothed
+    std::vector<std::size_t> last_cells_; // cells in each executor's last take
 };
 
 // The wall-clock and sum-of-parts timings of a run — concurrent execution
@@ -379,6 +404,9 @@ public:
 
 private:
     QueuePolicy               queue_policy_ = QueuePolicy::Auto;
+    // Per-executor cell times measured by the last DynamicQueue run, so the
+    // next frame's queue starts informed rather than with probes.
+    std::vector<double>       queue_speeds_;
     const IDecomposeStrategy& decompose_;
     const IDispatchStrategy&  dispatch_;
     const IMergeStrategy&     merge_;

@@ -18,6 +18,8 @@
 
 #include <llvm/Support/raw_ostream.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -194,8 +196,34 @@ public:
         r.peak_rss_kb = peak_rss_kb();
         r.ok = true;
         // The CPU path computes floats; Auto keeps them. A caller that wants
-        // the GPU paths' payload for every path pays one quantising pass here.
-        if (cfg_.output_format == TracerConfig::OutputFormat::RGBA8) r.to_rgba8();
+        // the GPU paths' payload for every path pays one quantising pass here,
+        // spread over the pool: done by one thread it took 1.3 ms at 400² and
+        // 17 ms at 1280², two to three times the render it followed.
+        if (cfg_.output_format == TracerConfig::OutputFormat::RGBA8) {
+            const std::size_t n = r.rgba.size();
+            std::vector<std::uint8_t> bytes = take_bytes(n);
+            const int threads = std::max(1, std::min(r.threads_used, 16));
+            std::atomic<std::size_t> next{0};
+            const std::size_t chunk = 65536;
+            const float* src = r.rgba.data();
+            std::uint8_t* dst = bytes.data();
+            TileScheduler::run_parallel(threads, [&] {
+                for (;;) {
+                    const std::size_t a = next.fetch_add(chunk, std::memory_order_relaxed);
+                    if (a >= n) break;
+                    const std::size_t b = std::min(n, a + chunk);
+                    for (std::size_t i = a; i < b; ++i) {
+                        float v = src[i];
+                        v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                        dst[i] = static_cast<std::uint8_t>(v * 255.0f + 0.5f);
+                    }
+                }
+            });
+            recycle(r.rgba);
+            r.rgba.clear();
+            r.rgba8  = std::move(bytes);
+            r.format = PixelFormat::RGBA8;
+        }
         return r;
     }
 

@@ -133,6 +133,12 @@ struct GpuRenderStats {
     double      record_ms   = 0;
     double      gpu_wait_ms = 0;
     double      readback_ms = 0;
+    // GPU-side split of gpu_wait_ms from timestamp queries, taken only when
+    // FREP_EXEC_PROFILE is set: the dispatch itself and the image-to-buffer
+    // copy that follows it (the rest of gpu_wait_ms is queue and wake-up
+    // latency). -1 when not measured.
+    double      gpu_dispatch_ms = -1;
+    double      gpu_copy_ms     = -1;
 
     // Breakdown of init_ms into its phases. The pipeline phase is the
     // prime suspect for the init blow-up on large shaders: it's where the
@@ -160,11 +166,16 @@ public:
     // The shader is expected to declare matching std430 buffers; the
     // GlslEmitter does this automatically when the scene contains the
     // corresponding nodes / materials.
+    // `float_image`: the shader was emitted for an rgba32f frame image
+    // (TracerConfig::output_format == Float); the context then creates that
+    // image and reads it back as floats without quantisation. Otherwise the
+    // image is rgba8 and a float request widens the bytes.
     static std::expected<std::unique_ptr<VulkanCtx>, std::string>
     create(const std::string& spv_path,
            const std::vector<float>& mesh_voxels = {},
            const std::vector<std::uint8_t>& texture_pixels = {},
-           const std::vector<float>& params = {});
+           const std::vector<float>& params = {},
+           bool float_image = false);
 
     ~VulkanCtx();
     VulkanCtx(const VulkanCtx&)            = delete;

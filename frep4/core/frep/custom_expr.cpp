@@ -271,6 +271,18 @@ CustomExprCompiler::gen_ival(const expr::Node& n) {
                                            q3=b.CreateFDiv(ah,cl),q4=b.CreateFDiv(ah,ch);
                                       out={mn(mn(q1,q2),mn(q3,q4)), mx(mx(q1,q2),mx(q3,q4))}; break; }
             }
+            // Rotation pair (expr_ast.hpp): ±a·cos θ ± b·sin θ lies in [-r, r],
+            // r = sqrt(a² + b²), whatever θ does over the box. The term-by-term
+            // sum above lets both products be extreme at once and is up to √2
+            // wider; the intersection keeps whichever end is tighter.
+            if (auto rp = expr::match_rotation_pair(n)) {
+                auto [ra_lo,ra_hi]=gen_ival(*rp->a);
+                auto [rb_lo,rb_hi]=gen_ival(*rp->b); if(!ra_lo||!rb_lo) return {};
+                auto sqmax=[&](llvm::Value* l, llvm::Value* h){ return mx(b.CreateFMul(l,l), b.CreateFMul(h,h)); };
+                auto r=b.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(mod_,llvm::Intrinsic::sqrt,{b.getFloatTy()}),
+                                    {b.CreateFAdd(sqmax(ra_lo,ra_hi), sqmax(rb_lo,rb_hi))});
+                out={mx(out.first, b.CreateFNeg(r)), mn(out.second, r)};
+            }
             break;
         }
         case Kind::Call: out = gen_call_ival(n); break;
@@ -298,7 +310,23 @@ CustomExprCompiler::gen_call_ival(const expr::Node& n) {
         auto spans0=b.CreateAnd(b.CreateFCmpOLE(l,fc(0.0f)), b.CreateFCmpOGE(h,fc(0.0f)));
         return {b.CreateSelect(spans0, fc(0.0f), mn(al,ah)), mx(al,ah)}; }
     if (nm=="min") return {mn(a[0].first,a[1].first), mn(a[0].second,a[1].second)};
-    if (nm=="max") return {mx(a[0].first,a[1].first), mx(a[0].second,a[1].second)};
+    if (nm=="max"){
+        std::pair<llvm::Value*,llvm::Value*> r{mx(a[0].first,a[1].first), mx(a[0].second,a[1].second)};
+        // Rotated box (expr_ast.hpp): max(|P| + c1, |Q| + c2) with (P, Q) = (a, b)
+        // turned by θ is at least sqrt((a² + b²)/2) + min(c1, c2). The term-by-
+        // term max above falls to min(c1, c2) wherever P and Q both straddle 0,
+        // which far from the axis they do as soon as θ spans a quarter turn.
+        if (auto rb = expr::match_rotated_box(n)) {
+            auto A=gen_ival(*rb->a), B=gen_ival(*rb->b); if(!A.first||!B.first) return {};
+            auto sqlo=[&](const std::pair<llvm::Value*,llvm::Value*>& v){   // lower bound of v² (0 when v straddles 0)
+                auto spans0=b.CreateAnd(b.CreateFCmpOLE(v.first,fc(0.0f)), b.CreateFCmpOGE(v.second,fc(0.0f)));
+                return b.CreateSelect(spans0, fc(0.0f), mn(b.CreateFMul(v.first,v.first), b.CreateFMul(v.second,v.second))); };
+            auto lo=b.CreateFAdd(I(llvm::Intrinsic::sqrt, b.CreateFMul(b.CreateFAdd(sqlo(A),sqlo(B)), fc(0.5f))),
+                                 fc(std::min(rb->c1, rb->c2)));
+            r.first=mx(r.first, lo);
+        }
+        return r;
+    }
     if (nm=="pow"){ // constant exponent, non-negative base (holds for the blend h^k)
         auto*P=llvm::Intrinsic::getOrInsertDeclaration(mod_,llvm::Intrinsic::pow,{b.getFloatTy()});
         auto lo=mx(a[0].first,fc(0.0f)), hi=mx(a[0].second,fc(0.0f));
@@ -1337,21 +1365,35 @@ std::optional<Iv> ival(const expr::Node& n, const Iv& X, const Iv& Y, const Iv& 
             auto l = ival(*n.children[0], X, Y, Z, reg);
             auto r = ival(*n.children[1], X, Y, Z, reg);
             if (!l || !r) return std::nullopt;
+            Iv v = iv_big();
             switch (n.bop) {
-                case expr::Op::Add: return Iv{l->lo + r->lo, l->hi + r->hi};
-                case expr::Op::Sub: return Iv{l->lo - r->hi, l->hi - r->lo};
+                case expr::Op::Add: v = Iv{l->lo + r->lo, l->hi + r->hi}; break;
+                case expr::Op::Sub: v = Iv{l->lo - r->hi, l->hi - r->lo}; break;
                 case expr::Op::Mul: {
                     float p[4] = {l->lo * r->lo, l->lo * r->hi, l->hi * r->lo, l->hi * r->hi};
-                    return Iv{std::min({p[0], p[1], p[2], p[3]}), std::max({p[0], p[1], p[2], p[3]})};
+                    v = Iv{std::min({p[0], p[1], p[2], p[3]}), std::max({p[0], p[1], p[2], p[3]})};
+                    break;
                 }
                 case expr::Op::Div: {
                     if (r->lo <= 0.0f && r->hi >= 0.0f) return iv_big();
                     Iv inv{1.0f / r->hi, 1.0f / r->lo};
                     float p[4] = {l->lo * inv.lo, l->lo * inv.hi, l->hi * inv.lo, l->hi * inv.hi};
-                    return Iv{std::min({p[0], p[1], p[2], p[3]}), std::max({p[0], p[1], p[2], p[3]})};
+                    v = Iv{std::min({p[0], p[1], p[2], p[3]}), std::max({p[0], p[1], p[2], p[3]})};
+                    break;
                 }
             }
-            return iv_big();
+            // Rotation pair (expr_ast.hpp): ±a·cos θ ± b·sin θ lies in [-r, r],
+            // r = sqrt(a² + b²), whatever θ does over the box. The term-by-term
+            // sum above lets both products be extreme at once and is up to √2
+            // wider; the intersection keeps whichever end is tighter.
+            if (auto rp = expr::match_rotation_pair(n)) {
+                auto A = ival(*rp->a, X, Y, Z, reg), B = ival(*rp->b, X, Y, Z, reg);
+                if (!A || !B) return std::nullopt;
+                const float rr = std::sqrt(std::max(A->lo * A->lo, A->hi * A->hi) +
+                                           std::max(B->lo * B->lo, B->hi * B->hi));
+                v = Iv{std::max(v.lo, -rr), std::min(v.hi, rr)};
+            }
+            return v;
         }
         case Kind::Call: {
             const auto& nm = n.ident;
@@ -1389,7 +1431,21 @@ std::optional<Iv> ival(const expr::Node& n, const Iv& X, const Iv& Y, const Iv& 
             if (a.size() != 2) return iv_big();
             const Iv& a1 = a[1];
             if (nm == "min") return Iv{std::min(a0.lo, a1.lo), std::min(a0.hi, a1.hi)};
-            if (nm == "max") return Iv{std::max(a0.lo, a1.lo), std::max(a0.hi, a1.hi)};
+            if (nm == "max") {
+                Iv v{std::max(a0.lo, a1.lo), std::max(a0.hi, a1.hi)};
+                // Rotated box (expr_ast.hpp): max(|P| + c1, |Q| + c2) with (P, Q) = (a, b)
+                // turned by θ is at least sqrt((a² + b²)/2) + min(c1, c2). The term-by-
+                // term max above falls to min(c1, c2) wherever P and Q both straddle 0,
+                // which far from the axis they do as soon as θ spans a quarter turn.
+                if (auto rb = expr::match_rotated_box(n)) {
+                    auto A = ival(*rb->a, X, Y, Z, reg), B = ival(*rb->b, X, Y, Z, reg);
+                    if (!A || !B) return std::nullopt;
+                    auto sqlo = [](const Iv& t) {   // lower bound of t² (0 when t straddles 0)
+                        return (t.lo <= 0.0f && t.hi >= 0.0f) ? 0.0f : std::min(t.lo * t.lo, t.hi * t.hi); };
+                    v.lo = std::max(v.lo, std::sqrt(0.5f * (sqlo(*A) + sqlo(*B))) + std::min(rb->c1, rb->c2));
+                }
+                return v;
+            }
             if (nm == "atan2") return Iv{-std::numbers::pi_v<float>, std::numbers::pi_v<float>};
             if (nm == "mod") {
                 if (a1.lo == a1.hi && a1.lo > 0.0f) return Iv{-a1.lo, a1.lo};
@@ -1441,10 +1497,17 @@ FRepNode::AABB CustomExprNode::infer_bounds() const {
     // refined only the cells on the current box's faces was tried and either
     // kept coarse interior cells the finer levels would have discarded (the
     // twisted bar's box went from ±1 to ±4) or, with the face test deferred,
-    // spent the budget on the slab. The twisted bar costs 88000 interval
-    // evaluations and about 80 ms, once per scene load, because sin and cos
-    // of 1.2z over a half-unit cell bound x·cos+y·sin loosely far from the
-    // bar; a rotation-aware bound for that pair would remove most of it.
+    // spent the budget on the slab. The twisted bar used to cost 88000 cells
+    // and about 90 ms, with a box of ±1 in x and y, because far from the bar
+    // both rotated coordinates straddle 0 over any cell whose z-range turns
+    // θ = 1.2z through a quarter turn, and the term-by-term max of the two
+    // |·| − 0.35 then straddles too. The rotated-box rule in ival (and the
+    // other interval twins, see expr_ast.hpp) knows that max(|u|, |v|) is at
+    // least the distance to the axis over √2; the same walk now takes 521
+    // cells and under a millisecond, and the box is ±0.5, the bar's corner
+    // radius rounded up to the half-unit cell. The rotation-pair rule alone
+    // (an upper bound on each coordinate) changes none of this, since a cell
+    // is discarded by a lower bound.
     constexpr long kCellBudget = 200000;
     long cells = 0;
     const auto t0 = std::chrono::steady_clock::now();

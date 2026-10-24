@@ -21,4 +21,15 @@ inline void unpack_rgba8(const std::uint8_t* src, float* dst, std::size_t n) {
     for (std::size_t i = 0; i < n; ++i) dst[i] = static_cast<float>(src[i]) * k;
 }
 
+// The reverse, for a caller that asked a float-image context for bytes: the
+// same clamp and round-to-nearest the CPU path's TileResult::to_rgba8 uses, so
+// a frame quantised here and one quantised there agree.
+inline void pack_rgba8(const float* src, std::uint8_t* dst, std::size_t n) {
+    for (std::size_t i = 0; i < n; ++i) {
+        float v = src[i];
+        v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+        dst[i] = static_cast<std::uint8_t>(v * 255.0f + 0.5f);
+    }
+}
+
 } // namespace frep::gpu

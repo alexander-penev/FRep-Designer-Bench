@@ -248,10 +248,18 @@ Where a frame's time goes, per path, outside the kernel: `FREP_EXEC_PROFILE=1`
 prints one line per frame from the GPU-IR and GPU-GLSL executors (whether
 codegen/emit was skipped, compile, run, and the launch / submit-to-signal /
 readback split inside run); `FREP_RTX_PROFILE=1` does the same for the RT
-path. The benchmark `frep4_pathcost` separates `run` (the executor's own
-timer) from `wall` (the whole `render()` call) — the difference is host work
-the executor does around the GPU — and `FREP_PATHS=gpu_ir,gpu_rtx` restricts a
-run to the named paths.
+path. Under either flag the Vulkan paths also record GPU timestamps around
+the dispatch (or trace) and the image-to-buffer copy that follows it, and
+print the two — the submit-to-signal time they otherwise report holds both
+plus the queue's latency, and the two parts are very unequal: at 512² the
+copy of the 1 MB frame across PCIe is 0.068 ms on this card whatever the
+scene, the compute 0.025 ms for the sphere and 0.2 ms for the colonnade,
+and the host's memcpy out of the mapped buffer another 0.07 ms, so a GPU
+frame of a simple field is three quarters transfer. The benchmark
+`frep4_pathcost` separates `run` (the executor's own timer) from `wall` (the
+whole `render()` call) — the difference is host work the executor does
+around the GPU — and `FREP_PATHS=gpu_ir,gpu_rtx` restricts a run to the
+named paths.
 
 Two things to know before trusting a sub-millisecond GPU number. The Vulkan
 paths spin on the frame fence before they block (`core/gpu/vk_fence_wait.hpp`):
@@ -325,21 +333,86 @@ Knobs for A/B comparisons, all read from the environment:
 | `FREP_CULL_SLABS=n` | (pathcost, scene_parity) per-tile cull with n slabs |
 | `FREP_DEBUG_BOUNDS=1` | print the bounds inferred for each CustomExpr, with the cell count and time the search took |
 | `FREP_CPU_PROFILE=1` | one line per CPU frame: content hash, result allocation, render (ms) |
+| `FREP_RTX_CELLS=n` | RT path: build the acceleration structure from the field's shell cells, n per axis (default 1, the single box; see the RT section) |
+| `FREP_RTX_MODE=query` | RT path: march inline in a compute shader with `rayQueryEXT` against the same structure, instead of in an intersection shader |
 | `FREP_PATHS`, `FREP_WARM_MS` | pathcost: which paths, how long to warm up |
-| `--format float\|rgba8` | pathcost: the TileResult payload (default: each path's fastest) |
-| `--policy plain\|tail`, `--min-ms` | tilequeue bench: queue policy (default tail, see above), energy window |
+| `--format float\|rgba8` | pathcost: the TileResult payload (default: each path's fastest); `float` on a GPU path renders into an rgba32f image, so the floats come back unquantised (four times the bytes) |
+| `--policy plain\|tail\|guided`, `--min-ms` | tilequeue bench: what Auto resolves to (default guided, see above), energy window; every policy is measured |
 
 The same choices are `TracerConfig` fields for code: `output_format`,
 `normal_method`, `bbox_clip`, `cull_slabs`, and `QueuePolicy` on the
 multi-path runner. Measured on the benchmark set at 512²: the tile cull
 (8 or 16 slabs) is within noise on every path and scene, so it stays off by
-default; the ray-box clip is worth 10–25% on the CPU path and 5–12% on the
-GPU paths for the bounded scenes, and costs 25% on the twisted bar, so it
-stays on with that one caveat recorded. The bounds search itself is a few
-hundred interval evaluations for the scenes here, except the twisted bar:
-sin and cos of 1.2z over a half-unit cell bound x·cos+y·sin loosely far
-from the bar, and it takes 88 000 evaluations and about 80 ms, once per
-scene load (a rotation-aware bound for that pair would remove most of it).
+default; the ray-box clip is worth 5–12% on the GPU paths and, on the CPU
+path, between a third and two thirds of the frame for the bounded scenes
+(the unbounded colonnade is unaffected). The clip used to measure the
+other way on the CPU — 17–56% *slower* with it than without, on every
+bounded scene, first noticed as "+25% on the twisted bar" — and the cause
+was not the march, which the clip shortens on every ray, but the clock.
+The clip makes every sky tile nearly free, so with 64-px tiles a 512²
+frame is mostly idle workers; the frequency governor parks their cores at
+the idle clock, and the one dense tile that decides the frame (about a
+thousand shaded pixels, shadow and ambient occlusion) lands on a cold core
+and runs there at 1.2 GHz, 3× slower than hot, while without the clip the
+sky work kept every core clocked up. The tile heuristic in
+`TileScheduler` assumed uniform tile cost; it now halves the tile until
+there are sixteen per thread rather than four (the 16-px floor stays), so
+the dense tile is four tiles on four cores, and the clip is faster than
+no clip everywhere. The same change removed the drop the CPU path showed
+at 1280² (3.6 ns per pixel against 2.0 at 800²): per-pixel cost now falls
+with resolution, 3.0 → 2.0 → 1.6 ns at 400², 800² and 1280².
+
+The bounds search itself is a few hundred interval evaluations for every
+scene here, the twisted bar included. It used to be 88 000 and 80 ms for
+that one, because the interval of x·cos(1.2z)+y·sin(1.2z) over a cell
+whose z turns the angle through a quarter turn straddles zero wherever the
+cell is; no per-coordinate interval, however exact, discards a cell far
+from the bar. Two rules in every interval evaluator (the CPU-IR codegen,
+the numeric twin in `node_interval.hpp`, the GLSL emitter and the bounds
+search's own) fix it: a rotation pair a·cosθ ± b·sinθ is bounded by
+±√(a²+b²) over the box, and max(|P|+c₁, |Q|+c₂) over two such pairs of one
+angle with the factors exchanged is bounded below by √((A²+B²)/2) + min(c),
+since P²+Q² = a²+b². The bar's box went from ±1 to ±0.5 in x and y, the
+search to 521 cells and 0.8 ms, and no other scene's box moved.
+
+### The RT path against the compute path
+
+The RT path renders the same field as the compute path and, on a single
+field, has measured slower per frame since the first audit (0.25 against
+0.19 ms on the sphere at 512²). Timestamps on both paths put the difference
+where it is: the frame image's trip to the host is the same on both (the
+0.068 ms PCIe copy and the 0.07 ms memcpy above), the host work around the
+submit is within 0.01 ms, and the GPU's own time is 0.057 ms on the RT path
+against 0.025 ms on compute for the sphere, 0.070 against 0.047 on the
+gyroid, 0.237 against 0.205 on the colonnade — a fixed 0.02–0.03 ms per
+512² frame, about 0.1 ns per ray amortised over the card, whatever the
+field. That is the cost of one hardware ray cast per pixel (the RTX 2080's
+traversal rate is of the order of ten gigarays per second), and a single
+box gives the traversal unit nothing to do for it: every ray that enters
+the box runs the whole march in the intersection shader exactly as the
+compute shader does. A compute march of these fields costs about as much
+as one cast, so the RT path cannot win on them by construction, and the
+two obvious remedies were built and measured so the statement is not an
+argument. Splitting the field into shell cells (`FREP_RTX_CELLS=n`,
+`core/gpu/rtx_cells.hpp`: the leaves of an octree over the scene box whose
+interval bound straddles zero, so the hardware skips the empty cells and
+the march runs one cell at a time) made every scene slower at 8, 16, 32
+and 64 cells per axis — sphere 0.057 → 0.066–0.084 ms, gyroid 0.070 →
+0.095–0.105, gear 0.080 → 0.118–0.139 — because each cell a ray enters is
+another cast and another shader invocation, and on these fields that costs
+more than the marching it saves. Running the march inline from a compute
+shader with `rayQueryEXT` against the same structure (`FREP_RTX_MODE=query`)
+removes the shader-stage transitions and changes nothing within noise
+(sphere 0.056, gyroid 0.063, colonnade 0.210 ms; the gear 0.101 against
+0.080), which locates the cost in the cast itself rather than in the
+pipeline's stages. Both stay in the tree as knobs, off by default, for
+fields where the march is the expensive part. Where the structure does
+have work to do the RT path pulls ahead: on the structured colonnade (27
+instanced columns, `scenes/frep4/c2_colonnade_struct.json`) it renders in
+0.357 ms against the compute path's 0.389, and the N-sphere grid of the
+instance table scales it to several times the compute path. The images are
+the same on every variant: the shell-cell and ray-query renders match the
+CPU to the parity floor, with the usual handful of silhouette pixels.
 
 For frame-level CPU profiling, `perf` samples the JIT'd code but cannot
 name it: the ORC JIT here registers no perf map, so samples inside

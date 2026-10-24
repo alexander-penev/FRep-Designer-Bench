@@ -48,12 +48,19 @@ struct RtShaderSet {
     // Mesh voxel grid (float SDF samples) for mesh scenes, bound at RT
     // binding 3. Empty for non-mesh scenes.
     std::vector<float> mesh_voxels;
+    // True when the intersection shader clips its march to the cell it was
+    // invoked for (rtx_cells.hpp), read from the box list at binding 4; the
+    // acceleration structure must then be built from those same boxes.
+    bool cells = false;
 };
 
 // Generate the RT shader set for a scene. Reuses GlslEmitter internally so the
-// SDF/material/shading code is byte-identical to the compute path.
+// SDF/material/shading code is byte-identical to the compute path. With
+// `cells` the intersection shader marches one shell cell at a time (see
+// rtx_cells.hpp) instead of the whole scene box.
 std::expected<RtShaderSet, std::string>
-emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg = {});
+emit_rt_shaders(const SceneGraph& scene, const TracerConfig& cfg = {},
+                bool cells = false);
 
 // ── Per-CSG-group shaders for the multi-BLAS broad-phase ─────────────────────
 //

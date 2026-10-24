@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -111,6 +112,13 @@ int main(int argc, char** argv) {
     // sitting there. Measure that floor once and subtract it, so the figures are
     // the marginal cost of rendering rather than the cost of owning the machine.
     double idle_cpu_w = 0, idle_gpu_w = 0;
+    // How much the floor itself moves between windows. A residual below it is
+    // not a measurement of the path but of the floor's wander: a card whose
+    // clock is not perfectly steady reads a few tenths of a watt differently
+    // from one window to the next, and over a 6 s run that is a couple of
+    // millijoules per frame charged to a CPU-only path that issued no GPU
+    // work at all. Such residuals are reported as zero.
+    double noise_cpu_w = 0, noise_gpu_w = 0;
     if (energy_s > 0) {
         // Let the machine settle first. Measuring the floor immediately after
         // the previous scene's run catches a package that is still hot and
@@ -121,20 +129,33 @@ int main(int argc, char** argv) {
         // floor taken in P5 under-subtracts by 13 W -- 9 mJ per frame at
         // 1500 frames per second, which is the size of the number measured.
         std::this_thread::sleep_for(std::chrono::seconds(12));
-        const double t_idle = 3.0;
-        if (cpu_e && cpu_e->available()) cpu_e->begin();
-        if (gpu_e && gpu_e->available()) gpu_e->begin();
-        auto i0 = std::chrono::steady_clock::now();
-        while (std::chrono::duration<double>(
-                   std::chrono::steady_clock::now() - i0).count() < t_idle) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        // Three windows: the mean is the floor, the largest deviation from it
+        // is the floor's own spread.
+        const int    n_win  = 3;
+        const double t_idle = 2.0;
+        double cpu_w[n_win] = {0, 0, 0}, gpu_w[n_win] = {0, 0, 0};
+        for (int w = 0; w < n_win; ++w) {
+            if (cpu_e && cpu_e->available()) cpu_e->begin();
+            if (gpu_e && gpu_e->available()) gpu_e->begin();
+            auto i0 = std::chrono::steady_clock::now();
+            while (std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - i0).count() < t_idle) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            double el = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - i0).count();
+            if (cpu_e && cpu_e->available()) { if (auto v = cpu_e->end()) cpu_w[w] = *v / el; }
+            if (gpu_e && gpu_e->available()) { if (auto v = gpu_e->end()) gpu_w[w] = *v / el; }
+            idle_cpu_w += cpu_w[w] / n_win;
+            idle_gpu_w += gpu_w[w] / n_win;
         }
-        double el = std::chrono::duration<double>(
-                        std::chrono::steady_clock::now() - i0).count();
-        if (cpu_e && cpu_e->available()) { if (auto v = cpu_e->end()) idle_cpu_w = *v / el; }
-        if (gpu_e && gpu_e->available()) { if (auto v = gpu_e->end()) idle_gpu_w = *v / el; }
-        std::printf("idle baseline: cpu %.1f W, gpu %.1f W (subtracted below)\n",
-                    idle_cpu_w, idle_gpu_w);
+        for (int w = 0; w < n_win; ++w) {
+            noise_cpu_w = std::max(noise_cpu_w, std::fabs(cpu_w[w] - idle_cpu_w));
+            noise_gpu_w = std::max(noise_gpu_w, std::fabs(gpu_w[w] - idle_gpu_w));
+        }
+        std::printf("idle baseline: cpu %.1f W (+-%.2f), gpu %.1f W (+-%.2f) "
+                    "(subtracted below; a residual within the +- is reported as 0)\n",
+                    idle_cpu_w, noise_cpu_w, idle_gpu_w, noise_gpu_w);
     }
 
     const PathKind paths[] = { PathKind::CpuIr, PathKind::GpuGlsl,
@@ -234,13 +255,14 @@ int main(int argc, char** argv) {
                 { if (auto v = cpu_e->end()) j_cpu = *v - idle_cpu_w * el; }
             if (gpu_e && gpu_e->available())
                 { if (auto v = gpu_e->end()) j_gpu = *v - idle_gpu_w * el; }
-            // Clamp only a *measured* value that fell below the baseline's
-            // noise floor. A counter that reported nothing stays at -1, which
-            // the table prints as a dash: "unavailable" and "zero" are not the
-            // same claim, and collapsing them silently reported a busy CPU path
-            // as costing no energy when the RAPL counter was simply locked.
-            if (have_cpu && j_cpu < 0) j_cpu = 0;
-            if (have_gpu && j_gpu < 0) j_gpu = 0;
+            // Clamp only a *measured* value that fell within the baseline's
+            // noise floor, on either side of it. A counter that reported
+            // nothing stays at -1, which the table prints as a dash:
+            // "unavailable" and "zero" are not the same claim, and collapsing
+            // them silently reported a busy CPU path as costing no energy when
+            // the RAPL counter was simply locked.
+            if (have_cpu && j_cpu < noise_cpu_w * el) j_cpu = 0;
+            if (have_gpu && j_gpu < noise_gpu_w * el) j_gpu = 0;
         }
         if (frames <= 0) frames = 1;
         double run = med(run_ms), wall = med(wall_ms), wb = med(warmbuild_ms);

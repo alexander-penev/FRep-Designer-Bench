@@ -1178,7 +1178,13 @@ GlslEmitter::emit(const SceneGraph& scene, const TracerConfig& cfg_in,
         << ((cfg.cull_slabs > 0)
             ? "shared float sh_cull_t0;\nshared float sh_cull_t1;\nshared uint sh_occ[" + std::to_string(cfg.cull_slabs) + "];\n"
             : "")
-        << "layout(set = 0, binding = 0, rgba8) uniform image2D out_image;\n";
+        // The frame is stored as 8 bits per channel unless the caller asked
+        // for floats (TracerConfig::output_format), which keeps the GPU's
+        // arithmetic intact on the way back -- what a parity comparison
+        // against the CPU's floats wants, and four times the bytes.
+        << "layout(set = 0, binding = 0, "
+        << (cfg.output_format == TracerConfig::OutputFormat::Float ? "rgba32f" : "rgba8")
+        << ") uniform image2D out_image;\n";
 
     // If we have MeshSDF nodes, declare the storage buffer.
     if (res.mesh_count > 0) {
